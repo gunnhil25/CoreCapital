@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: corecapital-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-corecapital_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-corecapital_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-corecapital}
+    volumes:
+      - corecapital_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-corecapital_user} -d ${POSTGRES_DB:-corecapital}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: ${CORECAPITAL_IMAGE:-ghcr.io/gunnhil25/corecapital:dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: corecapital-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: "0.0.0.0"
+      DATABASE_URL: postgres://${POSTGRES_USER:-corecapital_user}:${POSTGRES_PASSWORD:-corecapital_secret}@db:5432/${POSTGRES_DB:-corecapital}
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
+      OPEN_BANKING_WEBHOOK_SECRET: ${OPEN_BANKING_WEBHOOK_SECRET:-change_me_webhook_secret}
+      AUTH_SECRET: ${AUTH_SECRET:-change_me_auth_secret_key}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+
+volumes:
+  corecapital_pgdata:
