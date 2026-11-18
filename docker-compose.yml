@@ -16,7 +16,7 @@ services:
       retries: 10
 
   app:
-    image: ${CORECAPITAL_IMAGE:-ghcr.io/gunnhil25/corecapital:dev}
+    image: ${CORECAPITAL_IMAGE:-ghcr.io/gunnhil25/corecapital:latest}
     build:
       context: .
       dockerfile: Dockerfile
