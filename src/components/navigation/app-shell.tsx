@@ -6,6 +6,7 @@ import { Sparkles } from "lucide-react";
 import { Sidebar } from "@/components/navigation/sidebar";
 import { Header } from "@/components/navigation/header";
 import { MobileNav } from "@/components/navigation/mobile-nav";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
 import type { SafeUser } from "@/actions/auth";
 
 interface AppShellProps {
@@ -38,6 +39,7 @@ export function AppShell({ initialized, user, children }: AppShellProps) {
   if ((!initialized && pathname === "/setup") || (initialized && !user && pathname === "/login")) {
     return (
       <div className="min-h-screen w-full bg-background text-foreground flex items-center justify-center p-4">
+        <ThemeToggle variant="compact" className="fixed top-5 right-5 z-20" />
         {children}
       </div>
     );

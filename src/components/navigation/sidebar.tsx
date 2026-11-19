@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
 import type { SafeUser } from "@/actions/auth";
 
 const navItems = [
@@ -115,7 +116,7 @@ export function Sidebar({ user }: { user: SafeUser }) {
       </div>
 
       {/* Infrastructure & Active User Node Status */}
-      <div className="p-4 border-t bg-muted/20">
+      <div className="p-4 border-t bg-muted/20 space-y-2.5">
         <div className="rounded-lg border bg-background/60 p-3 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 min-w-0">
@@ -138,6 +139,8 @@ export function Sidebar({ user }: { user: SafeUser }) {
             <span>Immutable Ledger Active</span>
           </div>
         </div>
+
+        <ThemeToggle variant="sidebar" />
       </div>
     </aside>
   );

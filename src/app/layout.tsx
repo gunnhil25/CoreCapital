@@ -3,6 +3,8 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { getAuthStatusAction } from "@/actions/auth";
 import { AppShell } from "@/components/navigation/app-shell";
+import { ThemeProvider } from "@/components/theme/theme-provider";
+import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -23,7 +25,10 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: "#0f172a",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f8fafc" },
+    { media: "(prefers-color-scheme: dark)", color: "#0f172a" },
+  ],
 };
 
 export default async function RootLayout({
@@ -34,11 +39,16 @@ export default async function RootLayout({
   const { initialized, user } = await getAuthStatusAction();
 
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body className={`${inter.className} min-h-screen bg-background text-foreground flex antialiased`}>
-        <AppShell initialized={initialized} user={user}>
-          {children}
-        </AppShell>
+        <ThemeProvider>
+          <AppShell initialized={initialized} user={user}>
+            {children}
+          </AppShell>
+        </ThemeProvider>
       </body>
     </html>
   );

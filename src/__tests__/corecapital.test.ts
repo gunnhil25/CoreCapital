@@ -57,6 +57,13 @@ import {
   setTestSession,
 } from "@/lib/auth";
 import { store } from "@/lib/store";
+import {
+  DEFAULT_THEME,
+  THEME_INIT_SCRIPT,
+  THEME_STORAGE_KEY,
+  getNextTheme,
+  resolveTheme,
+} from "@/lib/theme";
 import { POST as openBankingWebhookPost } from "@/app/api/webhooks/open-banking/route";
 import { GET as healthGet } from "@/app/api/health/route";
 
@@ -658,5 +665,22 @@ describe("First-Run Setup, Auth, Workspace Reset & Admin User Management", () =>
     expect(finalList.users[0].id).toBe(adminId);
 
     setTestSession(undefined);
+  });
+});
+
+describe("Theme Mode Helpers", () => {
+  it("defaults to dark theme when stored value is missing or invalid", () => {
+    expect(DEFAULT_THEME).toBe("dark");
+    expect(resolveTheme(null)).toBe("dark");
+    expect(resolveTheme(undefined)).toBe("dark");
+    expect(resolveTheme("system")).toBe("dark");
+  });
+
+  it("resolves explicit light and dark values and toggles cleanly", () => {
+    expect(resolveTheme("light")).toBe("light");
+    expect(resolveTheme("dark")).toBe("dark");
+    expect(getNextTheme("dark")).toBe("light");
+    expect(getNextTheme("light")).toBe("dark");
+    expect(THEME_INIT_SCRIPT).toContain(THEME_STORAGE_KEY);
   });
 });

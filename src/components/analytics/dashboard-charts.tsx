@@ -171,6 +171,8 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
                     borderRadius: "0.5rem",
                     fontSize: "12px",
                   }}
+                  itemStyle={{ color: "hsl(var(--foreground))" }}
+                  labelStyle={{ color: "hsl(var(--foreground))" }}
                 />
               </PieChart>
             </ResponsiveContainer>

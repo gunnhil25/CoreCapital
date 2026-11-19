@@ -6,6 +6,7 @@ import { useTransition } from "react";
 import { Plus, Upload, Sparkles, Calendar, Settings, LogOut, UserCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { logoutAction, SafeUser } from "@/actions/auth";
 
 export function Header({ user }: { user: SafeUser }) {
@@ -61,6 +62,8 @@ export function Header({ user }: { user: SafeUser }) {
         </Button>
 
         <div className="h-5 w-px bg-border mx-1 hidden sm:block" />
+
+        <ThemeToggle variant="icon" className="lg:hidden" />
 
         <Link
           href="/settings"
