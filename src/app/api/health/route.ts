@@ -1,16 +1,28 @@
 import { NextResponse } from "next/server";
-import { checkDbConnection } from "@/db";
+import { store } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const dbConnected = await checkDbConnection();
+  const dbReady = await store.isDbReady();
+
+  if (process.env.NODE_ENV === "production" && !dbReady) {
+    return NextResponse.json(
+      {
+        status: "degraded",
+        app: "corecapital",
+        database: "disconnected",
+        timestamp: new Date().toISOString(),
+      },
+      { status: 503 }
+    );
+  }
 
   return NextResponse.json(
     {
       status: "ok",
       app: "corecapital",
-      database: dbConnected ? "connected" : "in_memory_fallback",
+      database: dbReady ? "connected" : "in_memory_fallback",
       timestamp: new Date().toISOString(),
     },
     { status: 200 }

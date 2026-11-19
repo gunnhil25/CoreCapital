@@ -760,10 +760,13 @@ async function ensureMigrated(): Promise<void> {
 
   migratePromise = (async () => {
     const reg = (await db.execute(
-      sql`SELECT to_regclass('public.users') AS tbl`
-    )) as unknown as Array<{ tbl?: string | null }>;
+      sql`SELECT to_regclass('public.users') AS users_tbl, to_regclass('drizzle.__drizzle_migrations') AS mig_tbl`
+    )) as unknown as Array<{ users_tbl?: string | null; mig_tbl?: string | null }>;
 
-    if (!reg[0]?.tbl) {
+    const hasUsersTable = Boolean(reg[0]?.users_tbl);
+    const hasMigrationsTable = Boolean(reg[0]?.mig_tbl);
+
+    if (!hasUsersTable || hasMigrationsTable) {
       await migrate(db, {
         migrationsFolder: path.join(process.cwd(), "src/db/migrations"),
       });
@@ -782,7 +785,8 @@ async function isDbReady(): Promise<boolean> {
   try {
     await ensureMigrated();
     return true;
-  } catch {
+  } catch (error) {
+    console.error("[CoreCapital] Database migration check failed:", error);
     return false;
   }
 }
@@ -1184,6 +1188,8 @@ function mapDbUser(u: typeof users.$inferSelect): UserRecord {
 }
 
 export const store = {
+  isDbReady,
+
   getVerifiedSessionUserId: async (): Promise<string | null> => {
     const session = await getSessionPayload();
     if (session) {

@@ -20,6 +20,7 @@ export * from "./schema";
 let cachedDbAvailable: boolean | null = null;
 let lastCheckedAt = 0;
 const CACHE_TTL_MS = 30_000;
+const FAILURE_CACHE_TTL_MS = 5_000;
 
 /**
  * Tests PostgreSQL connectivity with a fast timeout and caches availability
@@ -31,7 +32,8 @@ export async function checkDbConnection(): Promise<boolean> {
   }
 
   const now = Date.now();
-  if (cachedDbAvailable !== null && now - lastCheckedAt < CACHE_TTL_MS) {
+  const ttl = cachedDbAvailable ? CACHE_TTL_MS : FAILURE_CACHE_TTL_MS;
+  if (cachedDbAvailable !== null && now - lastCheckedAt < ttl) {
     return cachedDbAvailable;
   }
 

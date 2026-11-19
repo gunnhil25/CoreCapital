@@ -420,6 +420,22 @@ describe("Container Healthcheck Endpoint", () => {
     expect(json.app).toBe("corecapital");
     expect(["connected", "in_memory_fallback"]).toContain(json.database);
   });
+
+  it("returns 503 degraded when database is unavailable in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const readySpy = vi.spyOn(store, "isDbReady").mockResolvedValueOnce(false);
+    try {
+      const res = await healthGet();
+      expect(res.status).toBe(503);
+      const json = await res.json();
+      expect(json.status).toBe("degraded");
+      expect(json.app).toBe("corecapital");
+      expect(json.database).toBe("disconnected");
+    } finally {
+      readySpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("Password Crypto & Signed Session Tokens", () => {

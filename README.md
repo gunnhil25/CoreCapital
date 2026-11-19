@@ -1,8 +1,124 @@
-# CoreCapital 🌌💰
+# 🌌 CoreCapital — Personal Budget & Financial Analytics Engine
 
-> Production-Grade Personal Budget & Financial Analytics Web Application with an **Immutable Ledger System**, automated Australian bank statement ingestion, **First Home Super Saver (FHSS)** tracking, **Defence Home Ownership Assistance Scheme (DHOAS)** subsidy tier progression, and **Subscription Creep Monitoring**.
+> Production-grade personal budget and financial analytics web application (**CoreCapital**) featuring an **Immutable Ledger System**, automated Australian bank statement ingestion, **First Home Super Saver (FHSS)** tracking, **Defence Home Ownership Assistance Scheme (DHOAS)** subsidy tier progression, and **Subscription Creep Monitoring**.
 
-Optimized for self-hosting in an unprivileged **Proxmox LXC container running Debian 12**, utilizing Next.js standalone server behind a **Cloudflare Tunnel**.
+Built with **Next.js 15 (Node.js 22 standalone)**, **PostgreSQL 16**, and **Drizzle ORM**, fully containerized with **Docker** and automatically built & published to GitHub Container Registry (`ghcr.io/gunnhil25/corecapital:latest`) via GitHub Actions.
+
+---
+
+## 🚀 Quick Start (Prebuilt Image via GHCR)
+
+The fastest way to deploy **CoreCapital** on a server or Proxmox LXC is by pulling the prebuilt image from GitHub Container Registry:
+
+```bash
+# 1. Clone this repository
+git clone https://github.com/gunnhil25/CoreCapital.git
+cd CoreCapital
+
+# 2. (Optional) Customize database passwords, auth secrets, or port in .env
+cp .env.example .env
+
+# 3. Pull the latest images and start the stack
+docker compose pull
+docker compose up -d
+```
+
+> **Note for private repositories:** If the GitHub repository or GHCR package is private, authenticate Docker once with a GitHub Personal Access Token (`read:packages` scope):
+> ```bash
+> echo "<YOUR_GITHUB_PAT>" | docker login ghcr.io -u <YOUR_GITHUB_USERNAME> --password-stdin
+> ```
+
+Once running:
+* **Web Application:** `http://<YOUR_SERVER_IP>:3000/` — On first launch, PostgreSQL migrations run automatically (`src/db/migrations`) and you are redirected to **`/setup`** (First-Run Wizard) to create your primary Admin account and choose either **Start Clean** or **Load Demo Data**.
+* **Health Check:** `http://<YOUR_SERVER_IP>:3000/api/health`
+
+> **HTTPS / Reverse Proxy Note:** CoreCapital inspects `X-Forwarded-Proto` automatically for session cookies, so plain HTTP deployments (such as testing directly on a local Proxmox LXC) work out of the box, while serving behind an HTTPS reverse proxy or Cloudflare Tunnel automatically enables `Secure` cookies. You can also set `COOKIE_SECURE=true` or `COOKIE_SECURE=false` in `.env` to override auto-detection. For production deployments, make sure to replace the default `POSTGRES_PASSWORD`, `AUTH_SECRET`, and `OPEN_BANKING_WEBHOOK_SECRET` values in `.env`.
+
+### Building Locally from Source (Optional)
+If you prefer to build the image locally instead of pulling from GHCR (do not pass `--build` when using the prebuilt GHCR image):
+```bash
+docker compose up -d --build
+```
+
+### Updating to the Latest Release
+Whenever new changes are pushed to `main`, GitHub Actions runs checks and publishes an updated `:latest` image. To update your running instance:
+```bash
+docker compose pull
+docker compose up -d
+```
+
+---
+
+## 📦 Proxmox LXC Deployment Guide
+
+### Step-by-Step Setup (Docker inside an LXC Container)
+If you are running Docker inside a Proxmox LXC container (e.g., Debian 12 or Ubuntu 24.04 template):
+
+1. **Enable LXC features for Docker:**
+   - In the Proxmox VE Web UI, select your LXC container → **Options** → **Features**.
+   - Enable **`nesting=1`** and **`keyctl=1`** (required for Docker inside an unprivileged LXC), then reboot the LXC if prompted.
+
+2. **Install Docker & Docker Compose plugin inside the LXC:**
+   ```bash
+   apt-get update && apt-get install -y curl git
+   curl -fsSL https://get.docker.com | sh
+   ```
+   Verify installation:
+   ```bash
+   docker --version
+   docker compose version
+   ```
+
+3. **Clone the repository and configure environment:**
+   ```bash
+   git clone https://github.com/gunnhil25/CoreCapital.git /opt/corecapital
+   cd /opt/corecapital
+   cp .env.example .env
+   # Optional (recommended for production): edit POSTGRES_PASSWORD, AUTH_SECRET, OPEN_BANKING_WEBHOOK_SECRET, or PORT
+   nano .env
+   ```
+
+4. **Pull the image and launch the stack:**
+   ```bash
+   # (Only needed if the GHCR package is private)
+   # docker login ghcr.io -u gunnhil25
+
+   docker compose pull
+   docker compose up -d
+   ```
+
+5. **Verify the deployment:**
+   ```bash
+   docker compose ps
+   curl -s http://localhost:3000/api/health
+   ```
+   You should see `"status":"ok"` and `"database":"connected"`.
+
+6. **Auto-start on LXC boot:**
+   Both `corecapital-db` and `corecapital-app` use `restart: unless-stopped`, so they start automatically whenever your Proxmox LXC boots.
+
+### Optional: Exposing via Cloudflare Tunnel (`cloudflared`)
+If you want to expose your LXC instance over HTTPS via Cloudflare Tunnel:
+```bash
+# Install cloudflared
+curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+dpkg -i cloudflared.deb
+
+# Authenticate and route traffic to the Docker app port (3000)
+cloudflared tunnel login
+cloudflared tunnel create corecapital
+cloudflared tunnel route dns corecapital budget.yourdomain.com
+cloudflared tunnel run corecapital --url http://localhost:3000
+```
+
+---
+
+## ⚙️ CI/CD Pipeline (GitHub Actions)
+
+Every push to `main`, `master`, `dev`, or a `v*.*.*` tag (as well as manual `workflow_dispatch`) triggers [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+1. Installs dependencies (`npm ci` on Node.js 22) and runs TypeScript type checking (`npx tsc --noEmit`) and automated tests (`npm test`).
+2. Builds the multi-stage standalone image from `Dockerfile` with GitHub Actions layer caching.
+3. Pushes the image to GHCR (`ghcr.io/gunnhil25/corecapital`) with branch, `sha-`, and semver tags, plus `:latest` on the default branch (`main`).
 
 ---
 
@@ -10,12 +126,12 @@ Optimized for self-hosting in an unprivileged **Proxmox LXC container running De
 
 * **Framework**: Next.js 15 (App Router, Node.js 22 runtime, `output: "standalone"`)
 * **Language**: TypeScript 5 (Strict Mode enabled)
-* **Database**: PostgreSQL 16
-* **ORM**: Drizzle ORM
+* **Database**: PostgreSQL 16 (Alpine in Docker Compose, persistent volume `corecapital_pgdata`)
+* **ORM**: Drizzle ORM (automatic startup migration from `src/db/migrations`)
 * **Styling**: Tailwind CSS + shadcn/ui design tokens
 * **Icons**: Lucide React
 * **Charts**: Recharts (SSR-safe dynamic hydration)
-* **Hosting Target**: Unprivileged Proxmox LXC (Debian 12) + Cloudflare Tunnel
+* **Hosting Target**: Unprivileged Proxmox LXC (Docker) + optional Cloudflare Tunnel
 
 ---
 
@@ -32,7 +148,7 @@ All database mutations occur exclusively via Next.js Server Actions (`"use serve
 
 ### 3. Mobile-First Responsiveness
 Dual-navigation architecture:
-* Pinned desktop sidebar with live LXC host telemetry.
+* Pinned desktop sidebar with live host/ledger telemetry.
 * Fixed mobile bottom bar with quick touch action button for mobile receipt capture and instant transaction logging.
 
 ---
@@ -61,102 +177,14 @@ Dual-navigation architecture:
 
 ---
 
-## 🐳 Quick Deployment via GitHub Container Registry & Docker Compose
+## 🗄️ Database Management & Backups
 
-### 1. Automatic Image Publishing (GitHub Actions -> GHCR)
-Every push to `main`, `dev`, or a `v*.*.*` release tag triggers [docker-publish.yml](.github/workflows/docker-publish.yml), which runs TypeScript & Vitest checks and pushes a multi-layer standalone Docker image to:
-```text
-ghcr.io/gunnhil25/corecapital:dev
-ghcr.io/gunnhil25/corecapital:latest
-```
-*(Ensure **Settings → Actions → General → Workflow permissions** allows Read and write permissions, and set your package visibility to Public or authenticate with a GitHub PAT via `docker login ghcr.io`.)*
-
-### 2. Deploy on Any Host with `docker compose`
-Copy `docker-compose.yml` and `.env.example` to your server, set strong secrets in `.env`, then pull and start:
-
+### Creating a Database Backup
 ```bash
-cp .env.example .env
-# Edit .env and set CORECAPITAL_IMAGE=ghcr.io/gunnhil25/corecapital:dev (or :latest for main)
-# plus strong POSTGRES_PASSWORD, AUTH_SECRET, and OPEN_BANKING_WEBHOOK_SECRET values
-
-docker compose pull
-docker compose up -d
+docker exec -t corecapital-db pg_dump -U corecapital_user corecapital > backup_$(date +%F).sql
 ```
 
-On first startup, the CoreCapital container automatically waits for PostgreSQL 16 (`service_healthy`), applies Drizzle SQL migrations (`src/db/migrations`), and launches the **`/setup` First-Run Wizard** so you can create your primary Admin account and choose either a Clean Slate or Demo Data ledger.
-
----
-
-## 🚀 Proxmox LXC Debian Deployment (Cloudflare Tunnel)
-
-### 1. Unprivileged LXC Setup
-Create a Debian 12 LXC in Proxmox (`unprivileged: 1`, 2 vCPUs, 2GB RAM, 20GB disk).
-
+### Restoring from Backup
 ```bash
-# Update and install Node.js 22 LTS
-apt update && apt upgrade -y
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt install -y nodejs git postgresql postgresql-contrib
-
-# Configure PostgreSQL 16
-sudo -u postgres psql
-CREATE DATABASE corecapital;
-CREATE USER corecapital_user WITH ENCRYPTED PASSWORD 'your_secure_password';
-GRANT ALL PRIVILEGES ON DATABASE corecapital TO corecapital_user;
-\q
-```
-
-### 2. Clone & Build Standalone Server
-```bash
-git clone https://github.com/gunnhil25/CoreCapital.git /opt/corecapital
-cd /opt/corecapital
-
-# Set up environment variables
-cp .env.example .env.production
-nano .env.production
-
-# Install and build standalone server
-npm ci
-npm run build
-cp -r public .next/standalone/public
-cp -r .next/static .next/standalone/.next/static
-```
-
-### 3. Run via Systemd Service
-Create `/etc/systemd/system/corecapital.service`:
-```ini
-[Unit]
-Description=CoreCapital Next.js Standalone Server
-After=network.target postgresql.service
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/opt/corecapital
-EnvironmentFile=/opt/corecapital/.env.production
-ExecStart=/usr/bin/node /opt/corecapital/.next/standalone/server.js
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload
-systemctl enable --now corecapital
-```
-
-### 4. Cloudflare Tunnel (cloudflared)
-Install Cloudflare Tunnel inside the LXC:
-```bash
-# Install cloudflared
-curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-dpkg -i cloudflared.deb
-
-# Authenticate and route traffic to local standalone server (port 3000)
-cloudflared tunnel login
-cloudflared tunnel create corecapital
-cloudflared tunnel route dns corecapital budget.yourdomain.com
-cloudflared tunnel run corecapital --url http://localhost:3000
+cat backup_YYYY-MM-DD.sql | docker exec -i corecapital-db psql -U corecapital_user corecapital
 ```
