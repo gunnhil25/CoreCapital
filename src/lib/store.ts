@@ -14,6 +14,7 @@ import {
   auditLogs,
   budgets,
   subscriptions,
+  cashFlowScheduledItems,
   propertyGoals,
   fhssContributions,
 } from "@/db/schema";
@@ -172,6 +173,29 @@ export interface FhssContributionRecord {
   bpayRef?: string;
 }
 
+export type CashFlowFrequency =
+  | "weekly"
+  | "fortnightly"
+  | "monthly"
+  | "quarterly"
+  | "annually"
+  | "one_off";
+
+export interface CashFlowScheduledItemRecord {
+  id: string;
+  userId: string;
+  accountId: string;
+  accountName?: string;
+  name: string;
+  type: "income" | "expense";
+  amount: number;
+  frequency: CashFlowFrequency;
+  startDate: string;
+  endDate?: string | null;
+  nextOccurrenceDate: string;
+  isActive: boolean;
+}
+
 export interface PropertyGoalConfig {
   userId?: string;
   goalName: string;
@@ -254,8 +278,16 @@ const inMemoryBudgetConfigs: Array<{
   startDate: string;
 }> = [];
 const inMemorySubscriptions: SubscriptionItem[] = [];
+const inMemoryCashFlowItems: CashFlowScheduledItemRecord[] = [];
 const inMemoryGoalConfigs = new Map<string, PropertyGoalConfig>();
 const inMemoryFhssContributions: FhssContributionRecord[] = [];
+
+function formatLocalIsoDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
 function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boolean) {
   const catMap = new Map<string, { id: string; name: string; slug: string; color: string }>();
@@ -656,6 +688,42 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
     },
   ];
 
+  const today = new Date();
+  const payDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 4);
+  const rentDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+  const todayIso = formatLocalIsoDate(today);
+
+  const seededCashFlowItems: CashFlowScheduledItemRecord[] = [
+    {
+      id: preserveLegacyTestIds ? "cf-1" : crypto.randomUUID(),
+      userId,
+      accountId: acc1.id,
+      accountName: acc1.name,
+      name: "Defence Force Salary",
+      type: "income",
+      amount: 3850,
+      frequency: "fortnightly",
+      startDate: todayIso,
+      endDate: null,
+      nextOccurrenceDate: formatLocalIsoDate(payDate),
+      isActive: true,
+    },
+    {
+      id: preserveLegacyTestIds ? "cf-2" : crypto.randomUUID(),
+      userId,
+      accountId: acc1.id,
+      accountName: acc1.name,
+      name: "Monthly Rent",
+      type: "expense",
+      amount: 1650,
+      frequency: "monthly",
+      startDate: todayIso,
+      endDate: null,
+      nextOccurrenceDate: formatLocalIsoDate(rentDate),
+      isActive: true,
+    },
+  ];
+
   return {
     seededCategories,
     seededAccounts,
@@ -664,6 +732,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
     seededBatches,
     seededBudgets,
     seededSubscriptions,
+    seededCashFlowItems,
     seededGoal,
     seededFhss,
   };
@@ -736,6 +805,7 @@ function seedInMemoryWorkspace(
     inMemoryBatches.push(...demo.seededBatches);
     inMemoryBudgetConfigs.push(...demo.seededBudgets);
     inMemorySubscriptions.push(...demo.seededSubscriptions);
+    inMemoryCashFlowItems.push(...demo.seededCashFlowItems);
     inMemoryGoalConfigs.set(userId, demo.seededGoal);
     inMemoryFhssContributions.push(...demo.seededFhss);
     inMemoryAuditLogs.push({
@@ -981,6 +1051,24 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
       );
     }
 
+    if (demo.seededCashFlowItems.length > 0) {
+      await db.insert(cashFlowScheduledItems).values(
+        demo.seededCashFlowItems.map((cf) => ({
+          id: toUuid(cf.id),
+          userId: dbUserId,
+          accountId: toUuid(cf.accountId),
+          name: cf.name,
+          type: cf.type,
+          amount: cf.amount.toFixed(2),
+          frequency: cf.frequency,
+          startDate: cf.startDate,
+          endDate: cf.endDate ?? null,
+          nextOccurrenceDate: cf.nextOccurrenceDate,
+          isActive: cf.isActive,
+        }))
+      );
+    }
+
     const initialStampDuty = calculateStampDuty(
       demo.seededGoal.locationCode,
       demo.seededGoal.targetPrice,
@@ -1107,6 +1195,7 @@ function wipeInMemoryUserWorkspace(userId: string): void {
   removeMatching(inMemoryBatches);
   removeMatching(inMemoryBudgetConfigs);
   removeMatching(inMemorySubscriptions);
+  removeMatching(inMemoryCashFlowItems);
   removeMatching(inMemoryFhssContributions);
   removeMatching(inMemoryRules);
   removeMatching(inMemoryAccounts);
@@ -1121,6 +1210,7 @@ async function wipeDbUserWorkspace(userId: string): Promise<void> {
   await db.delete(importBatches).where(eq(importBatches.userId, dbUserId));
   await db.delete(budgets).where(eq(budgets.userId, dbUserId));
   await db.delete(subscriptions).where(eq(subscriptions.userId, dbUserId));
+  await db.delete(cashFlowScheduledItems).where(eq(cashFlowScheduledItems.userId, dbUserId));
   await db.delete(propertyGoals).where(eq(propertyGoals.userId, dbUserId));
   await db.delete(fhssContributions).where(eq(fhssContributions.userId, dbUserId));
   await db.delete(classificationRules).where(eq(classificationRules.userId, dbUserId));
@@ -1506,6 +1596,7 @@ export const store = {
     inMemoryAuditLogs.length = 0;
     inMemoryBudgetConfigs.length = 0;
     inMemorySubscriptions.length = 0;
+    inMemoryCashFlowItems.length = 0;
     inMemoryGoalConfigs.clear();
     inMemoryFhssContributions.length = 0;
   },
@@ -2410,6 +2501,166 @@ export const store = {
     );
     if (idx !== -1) {
       inMemoryFhssContributions.splice(idx, 1);
+    }
+  },
+
+  getCashFlowScheduledItems: async (
+    explicitUserId?: string
+  ): Promise<CashFlowScheduledItemRecord[]> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return [];
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const [rows, accountRows] = await Promise.all([
+        db
+          .select()
+          .from(cashFlowScheduledItems)
+          .where(eq(cashFlowScheduledItems.userId, dbUserId))
+          .orderBy(asc(cashFlowScheduledItems.nextOccurrenceDate)),
+        db.select().from(accounts).where(eq(accounts.userId, dbUserId)),
+      ]);
+      const accMap = new Map(accountRows.map((a) => [a.id, a.name]));
+
+      return rows.map((r) => ({
+        id: r.id,
+        userId: r.userId,
+        accountId: r.accountId,
+        accountName: accMap.get(r.accountId) || "Account",
+        name: r.name,
+        type: r.type === "income" ? "income" : "expense",
+        amount: parseFloat(r.amount) || 0,
+        frequency: r.frequency as CashFlowFrequency,
+        startDate: r.startDate,
+        endDate: r.endDate ?? null,
+        nextOccurrenceDate: r.nextOccurrenceDate,
+        isActive: r.isActive,
+      }));
+    }
+
+    const userAccounts = inMemoryAccounts.filter((a) => a.userId === userId);
+    const accMap = new Map(userAccounts.map((a) => [a.id, a.name]));
+    return inMemoryCashFlowItems
+      .filter((item) => item.userId === userId)
+      .sort((a, b) => a.nextOccurrenceDate.localeCompare(b.nextOccurrenceDate))
+      .map((item) => ({
+        ...item,
+        accountName: accMap.get(item.accountId) || item.accountName || "Account",
+      }));
+  },
+
+  addCashFlowScheduledItem: async (
+    input: {
+      accountId?: string;
+      name: string;
+      type: "income" | "expense";
+      amount: number;
+      frequency: CashFlowFrequency;
+      nextOccurrenceDate: string;
+      startDate?: string;
+      endDate?: string | null;
+    },
+    explicitUserId?: string
+  ): Promise<CashFlowScheduledItemRecord> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const userAccounts = await store.getAccounts(userId);
+    const matchedAccount =
+      (input.accountId ? userAccounts.find((a) => a.id === input.accountId) : undefined) ||
+      userAccounts[0];
+    if (!matchedAccount) {
+      throw new Error("No active account found.");
+    }
+
+    const startDate = input.startDate || input.nextOccurrenceDate;
+    const newItem: CashFlowScheduledItemRecord = {
+      id: crypto.randomUUID(),
+      userId,
+      accountId: matchedAccount.id,
+      accountName: matchedAccount.name,
+      name: input.name.trim(),
+      type: input.type,
+      amount: Math.round(input.amount * 100) / 100,
+      frequency: input.frequency,
+      startDate,
+      endDate: input.endDate ?? null,
+      nextOccurrenceDate: input.nextOccurrenceDate,
+      isActive: true,
+    };
+
+    if (await isDbReady()) {
+      await db.insert(cashFlowScheduledItems).values({
+        id: newItem.id,
+        userId: toUuid(userId),
+        accountId: toUuid(newItem.accountId),
+        name: newItem.name,
+        type: newItem.type,
+        amount: newItem.amount.toFixed(2),
+        frequency: newItem.frequency,
+        startDate: newItem.startDate,
+        endDate: newItem.endDate,
+        nextOccurrenceDate: newItem.nextOccurrenceDate,
+        isActive: true,
+      });
+    } else {
+      inMemoryCashFlowItems.push(newItem);
+    }
+
+    return newItem;
+  },
+
+  toggleCashFlowScheduledItem: async (
+    id: string,
+    isActive: boolean,
+    explicitUserId?: string
+  ): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return;
+
+    if (await isDbReady()) {
+      await db
+        .update(cashFlowScheduledItems)
+        .set({ isActive, updatedAt: new Date() })
+        .where(
+          and(
+            eq(cashFlowScheduledItems.id, toUuid(id)),
+            eq(cashFlowScheduledItems.userId, toUuid(userId))
+          )
+        );
+      return;
+    }
+
+    const item = inMemoryCashFlowItems.find((i) => i.id === id && i.userId === userId);
+    if (item) {
+      item.isActive = isActive;
+    }
+  },
+
+  deleteCashFlowScheduledItem: async (
+    id: string,
+    explicitUserId?: string
+  ): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return;
+
+    if (await isDbReady()) {
+      await db
+        .delete(cashFlowScheduledItems)
+        .where(
+          and(
+            eq(cashFlowScheduledItems.id, toUuid(id)),
+            eq(cashFlowScheduledItems.userId, toUuid(userId))
+          )
+        );
+      return;
+    }
+
+    const idx = inMemoryCashFlowItems.findIndex((i) => i.id === id && i.userId === userId);
+    if (idx !== -1) {
+      inMemoryCashFlowItems.splice(idx, 1);
     }
   },
 };

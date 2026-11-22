@@ -30,6 +30,13 @@ import {
   deleteFhssContributionAction,
 } from "@/actions/property-goals";
 import {
+  getCashFlowProjectionAction,
+  getCashFlowPageDataAction,
+  createCashFlowItemAction,
+  toggleCashFlowItemAction,
+  deleteCashFlowItemAction,
+} from "@/actions/cash-flow";
+import {
   normalizeDate,
   cleanMerchantName,
   computeDeduplicationHash,
@@ -762,18 +769,16 @@ describe("Theme Mode Helpers", () => {
 
 describe("Configurable Property Goal Actions & Schemes", () => {
   it("supports custom goal creation without hardcoded 2029 defaults, FHSS/DHOAS toggles, and custom DHOAS amounts", async () => {
-    const status = await getAuthStatusAction();
-    if (!status.initialized) {
-      await setupInitialAdminAction({
-        name: "Goal Tester",
-        email: "goals@corecapital.local",
-        password: "GoalPassword123!",
-        baseCurrency: "AUD",
-        seedMode: "clean",
-      });
-    } else {
-      await resetMyWorkspaceAction("clean");
-    }
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    const setupRes = await setupInitialAdminAction({
+      name: "Goal Tester",
+      email: "goals@corecapital.local",
+      password: "GoalPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+    expect(setupRes.success).toBe(true);
 
     const initial = await getPropertyGoalModelAction();
     expect(initial.hasGoal).toBe(false);
@@ -902,5 +907,97 @@ describe("Configurable Property Goal Actions & Schemes", () => {
     expect(afterDelGoal.success).toBe(true);
     expect(afterDelGoal.data?.hasGoal).toBe(false);
     expect(afterDelGoal.data?.goal).toBeNull();
+    setTestSession(undefined);
+  });
+});
+
+function localIsoPlusDays(offsetDays: number): string {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+describe("Cash Flow Forecasting & Scheduled Items", () => {
+  it("starts completely empty after clean slate reset and projects only user-configured items", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    const setupRes = await setupInitialAdminAction({
+      name: "Cash Flow Tester",
+      email: "cashflow@corecapital.local",
+      password: "CashFlowPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+    expect(setupRes.success).toBe(true);
+
+    const clean30 = await getCashFlowProjectionAction(30);
+    const clean90 = await getCashFlowProjectionAction(90);
+    for (const proj of [clean30, clean90]) {
+      expect(proj.startingBalance).toBe(0);
+      expect(proj.endingBalance).toBe(0);
+      expect(proj.lowestBalance).toBe(0);
+      expect(proj.netChange).toBe(0);
+      expect(proj.scheduledIncomeCount).toBe(0);
+      expect(proj.scheduledIncomeTotal).toBe(0);
+      expect(proj.scheduledExpenseCount).toBe(0);
+      expect(proj.scheduledExpenseTotal).toBe(0);
+      expect(proj.points.every((p) => p.eventDescription === undefined)).toBe(true);
+    }
+
+    // Add a fortnightly income starting in 5 days -> occurs on day 5 and day 19 in 30d window (2x $2,000)
+    const incRes = await createCashFlowItemAction({
+      name: "Paycheck",
+      type: "income",
+      amount: 2000,
+      frequency: "fortnightly",
+      nextOccurrenceDate: localIsoPlusDays(5),
+    });
+    expect(incRes.success).toBe(true);
+    expect(incRes.item).toBeDefined();
+
+    // Add a one-off expense in 10 days -> $500
+    const expRes = await createCashFlowItemAction({
+      name: "Car Service",
+      type: "expense",
+      amount: 500,
+      frequency: "one_off",
+      nextOccurrenceDate: localIsoPlusDays(10),
+    });
+    expect(expRes.success).toBe(true);
+    expect(expRes.item).toBeDefined();
+
+    const afterAdd = await getCashFlowProjectionAction(30);
+    expect(afterAdd.scheduledIncomeCount).toBe(2);
+    expect(afterAdd.scheduledIncomeTotal).toBe(4000);
+    expect(afterAdd.scheduledExpenseCount).toBe(1);
+    expect(afterAdd.scheduledExpenseTotal).toBe(500);
+    expect(afterAdd.netChange).toBe(3500);
+    expect(afterAdd.endingBalance).toBe(3500);
+
+    // Pause the income item -> excluded from projection
+    await toggleCashFlowItemAction(incRes.item!.id, false);
+    const afterPause = await getCashFlowProjectionAction(30);
+    expect(afterPause.scheduledIncomeCount).toBe(0);
+    expect(afterPause.scheduledIncomeTotal).toBe(0);
+    expect(afterPause.scheduledExpenseCount).toBe(1);
+    expect(afterPause.netChange).toBe(-500);
+
+    // Delete expense item -> back to zero events
+    await deleteCashFlowItemAction(expRes.item!.id);
+    const pageAfterDel = await getCashFlowPageDataAction();
+    expect(pageAfterDel.scheduledItems).toHaveLength(1);
+    expect(pageAfterDel.projection30.netChange).toBe(0);
+
+    // Clean slate reset wipes all scheduled cash flow items
+    const resetRes = await resetMyWorkspaceAction("clean");
+    expect(resetRes.success).toBe(true);
+    const afterReset = await getCashFlowPageDataAction();
+    expect(afterReset.scheduledItems).toHaveLength(0);
+    expect(afterReset.projection30.scheduledIncomeCount).toBe(0);
+    expect(afterReset.projection30.endingBalance).toBe(0);
+
+    setTestSession(undefined);
   });
 });
