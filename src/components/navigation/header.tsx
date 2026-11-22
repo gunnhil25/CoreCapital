@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useTransition } from "react";
-import { Plus, Upload, Sparkles, Calendar, Settings, LogOut, UserCheck } from "lucide-react";
+import { useEffect, useState, useTransition } from "react";
+import { Plus, Upload, Sparkles, Calendar, Clock, Settings, LogOut, UserCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
@@ -12,13 +12,32 @@ import { logoutAction, SafeUser } from "@/actions/auth";
 export function Header({ user }: { user: SafeUser }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
+  const [now, setNow] = useState<Date | null>(null);
 
-  const today = new Intl.DateTimeFormat("en-AU", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  }).format(new Date());
+  useEffect(() => {
+    setNow(new Date());
+    const timer = setInterval(() => {
+      setNow(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const dateLabel = now
+    ? new Intl.DateTimeFormat("en-AU", {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      }).format(now)
+    : "Loading date...";
+
+  const timeLabel = now
+    ? new Intl.DateTimeFormat("en-AU", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(now)
+    : "--:--:--";
 
   const handleLogout = () => {
     startTransition(async () => {
@@ -40,9 +59,16 @@ export function Header({ user }: { user: SafeUser }) {
             CoreCapital
           </span>
         </div>
-        <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground font-mono bg-muted/50 px-2.5 py-1 rounded-md">
-          <Calendar className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
-          <span>{today}</span>
+        <div className="hidden sm:flex items-center gap-2.5 text-xs text-muted-foreground font-mono tabular-nums bg-muted/60 border border-border/60 px-3 py-1.5 rounded-lg">
+          <span className="inline-flex items-center gap-1.5">
+            <Calendar className="h-3.5 w-3.5 text-primary shrink-0" />
+            <span>{dateLabel}</span>
+          </span>
+          <span className="h-3.5 w-px bg-border" aria-hidden="true" />
+          <span className="inline-flex items-center gap-1.5 text-foreground/90">
+            <Clock className="h-3.5 w-3.5 text-primary shrink-0" />
+            <span suppressHydrationWarning>{timeLabel}</span>
+          </span>
         </div>
       </div>
 
