@@ -145,8 +145,8 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
                     return null;
                   }}
                 />
-                <Bar dataKey="income" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={32} />
-                <Bar dataKey="expenses" fill="#f43f5e" radius={[4, 4, 0, 0]} maxBarSize={32} />
+                <Bar dataKey="income" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={32} isAnimationActive={false} />
+                <Bar dataKey="expenses" fill="#f43f5e" radius={[4, 4, 0, 0]} maxBarSize={32} isAnimationActive={false} />
               </BarChart>
             </ResponsiveContainer>
           )}
@@ -214,6 +214,7 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
                   outerRadius={75}
                   paddingAngle={3}
                   dataKey="value"
+                  isAnimationActive={false}
                   className={!drilledParent && hasAnyDrilldown ? "cursor-pointer outline-none" : "outline-none"}
                   onClick={(entry: any) => {
                     if (drilledParent) return;

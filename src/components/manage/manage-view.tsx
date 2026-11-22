@@ -1269,7 +1269,7 @@ export function ManageView({
               <div className="flex items-start justify-between border-b pb-3 gap-2">
                 <div>
                   <h3 className="text-base font-bold">
-                    {retireMode === "merge" ? "Merge &amp; Retire" : "Delete Category"}{" "}
+                    {retireMode === "merge" ? "Merge & Retire" : "Delete Category"}{" "}
                     &ldquo;{retireCatTarget.name}&rdquo;
                   </h3>
                   <p className="text-xs text-muted-foreground mt-0.5">
@@ -1296,25 +1296,34 @@ export function ManageView({
               )}
 
               <div className="space-y-2.5">
-                <label
-                  className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs cursor-pointer transition-colors ${
+                <div
+                  onClick={() => {
+                    if (replacementOptions.length > 0) setRetireMode("merge");
+                  }}
+                  className={`p-3 rounded-lg border text-xs transition-colors space-y-2 ${
                     replacementOptions.length === 0
                       ? "opacity-50 cursor-not-allowed"
                       : retireMode === "merge"
                       ? "border-primary bg-primary/5"
-                      : "hover:bg-muted/30"
+                      : "hover:bg-muted/30 cursor-pointer"
                   }`}
                 >
-                  <input
-                    type="radio"
-                    name="retire-mode"
-                    checked={retireMode === "merge"}
-                    disabled={replacementOptions.length === 0}
-                    onChange={() => setRetireMode("merge")}
-                    className="mt-0.5 accent-primary"
-                  />
-                  <div className="space-y-2 flex-1">
-                    <div>
+                  <label
+                    htmlFor="retire-mode-merge"
+                    className={`flex items-start gap-2.5 ${
+                      replacementOptions.length === 0 ? "cursor-not-allowed" : "cursor-pointer"
+                    }`}
+                  >
+                    <input
+                      id="retire-mode-merge"
+                      type="radio"
+                      name="retire-mode"
+                      checked={retireMode === "merge"}
+                      disabled={replacementOptions.length === 0}
+                      onChange={() => setRetireMode("merge")}
+                      className="mt-0.5 accent-primary"
+                    />
+                    <div className="flex-1">
                       <span className="font-semibold block">
                         Merge &amp; Reassign into Replacement Category
                       </span>
@@ -1325,8 +1334,11 @@ export function ManageView({
                           : ""}
                       </span>
                     </div>
-                    {retireMode === "merge" && replacementOptions.length > 0 && (
+                  </label>
+                  {retireMode === "merge" && replacementOptions.length > 0 && (
+                    <div className="pl-6">
                       <select
+                        id="retire-replacement-select"
                         aria-label="Replacement category"
                         value={replacementCatId}
                         onChange={(e) => setReplacementCatId(e.target.value)}
@@ -1338,11 +1350,12 @@ export function ManageView({
                           </option>
                         ))}
                       </select>
-                    )}
-                  </div>
-                </label>
+                    </div>
+                  )}
+                </div>
 
                 <label
+                  htmlFor="retire-mode-delete"
                   className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs cursor-pointer transition-colors ${
                     retireMode === "delete"
                       ? "border-destructive/60 bg-destructive/5"
@@ -1350,6 +1363,7 @@ export function ManageView({
                   }`}
                 >
                   <input
+                    id="retire-mode-delete"
                     type="radio"
                     name="retire-mode"
                     checked={retireMode === "delete"}

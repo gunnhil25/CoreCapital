@@ -62,7 +62,6 @@
       radial-gradient(900px circle at 12% -10%, rgba(109, 93, 252, 0.09), transparent 55%),
       radial-gradient(750px circle at 88% 0%, rgba(39, 198, 165, 0.08), transparent 52%);
     background-attachment: fixed;
-    transition: background-color 220ms ease, color 220ms ease;
   }
   .dark body {
     background-image:
@@ -87,14 +86,12 @@
   background: hsl(var(--muted-foreground) / 0.4);
 }
 
-@keyframes cc-fade-up {
+@keyframes cc-page-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -130,7 +127,7 @@
 }
 
 .cc-animate-page {
-  animation: cc-fade-up 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: cc-page-in 0.22s ease-out both;
 }
 
 .cc-animate-tab {
