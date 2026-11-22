@@ -59,15 +59,15 @@ export function Sidebar({ user }: { user: SafeUser }) {
   const pathname = usePathname();
 
   return (
-    <aside className="hidden lg:flex w-64 flex-col border-r bg-card/60 backdrop-blur-xl h-screen sticky top-0 shrink-0 select-none">
+    <aside className="hidden lg:flex w-64 flex-col border-r bg-card/80 backdrop-blur-xl h-screen sticky top-0 shrink-0 select-none">
       {/* Brand Header */}
       <div className="h-16 shrink-0 flex items-center px-6 border-b justify-between">
         <Link href="/" className="flex items-center gap-2.5 font-bold text-lg tracking-tight">
-          <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-sky-600 via-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-sky-500/20">
+          <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-[#6d5dfc] to-[#27c6a5] flex items-center justify-center text-white shadow-md shadow-[#6d5dfc]/25">
             <Sparkles className="h-4 w-4" />
           </div>
           <div>
-            <span className="bg-gradient-to-r from-sky-600 to-indigo-600 bg-clip-text text-transparent font-extrabold">
+            <span className="bg-gradient-to-r from-[#6d5dfc] to-[#27c6a5] bg-clip-text text-transparent font-extrabold">
               CoreCapital
             </span>
             <span className="block text-[10px] uppercase font-mono tracking-widest text-muted-foreground -mt-1">
@@ -75,7 +75,7 @@ export function Sidebar({ user }: { user: SafeUser }) {
             </span>
           </div>
         </Link>
-        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 border-sky-500/30 text-sky-600 dark:text-sky-400 font-mono">
+        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 border-[#6d5dfc]/30 text-[#6d5dfc] dark:text-[#8f83ff] font-mono">
           v1.0
         </Badge>
       </div>

@@ -49,7 +49,7 @@ export function AppShell({ initialized, user, children }: AppShellProps) {
   if (!initialized || !user || isAuthRoute) {
     return (
       <div className="min-h-screen w-full bg-background text-foreground flex flex-col items-center justify-center gap-3 p-4">
-        <div className="h-12 w-12 rounded-2xl bg-gradient-to-tr from-sky-600 via-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-lg animate-pulse">
+        <div className="h-12 w-12 rounded-2xl bg-gradient-to-tr from-[#6d5dfc] to-[#27c6a5] flex items-center justify-center text-white shadow-lg shadow-[#6d5dfc]/25 animate-pulse">
           <Sparkles className="h-6 w-6" />
         </div>
         <p className="text-xs font-mono text-muted-foreground">

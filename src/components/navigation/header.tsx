@@ -48,14 +48,14 @@ export function Header({ user }: { user: SafeUser }) {
   };
 
   return (
-    <header className="h-16 border-b bg-card/40 backdrop-blur-md px-4 sm:px-6 flex items-center justify-between sticky top-0 z-40">
+    <header className="h-16 border-b bg-card/75 backdrop-blur-xl px-4 sm:px-6 flex items-center justify-between sticky top-0 z-40">
       {/* Mobile Branding / Desktop Breadcrumb */}
       <div className="flex items-center gap-3">
         <div className="lg:hidden flex items-center gap-2">
-          <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-sky-600 to-indigo-600 flex items-center justify-center text-white shadow-sm">
+          <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-[#6d5dfc] to-[#27c6a5] flex items-center justify-center text-white shadow-sm shadow-[#6d5dfc]/20">
             <Sparkles className="h-4 w-4" />
           </div>
-          <span className="font-bold text-base bg-gradient-to-r from-sky-600 to-indigo-600 bg-clip-text text-transparent">
+          <span className="font-bold text-base bg-gradient-to-r from-[#6d5dfc] to-[#27c6a5] bg-clip-text text-transparent">
             CoreCapital
           </span>
         </div>
