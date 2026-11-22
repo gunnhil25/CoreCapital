@@ -1343,6 +1343,83 @@ function mapDbUser(u: typeof users.$inferSelect): UserRecord {
   };
 }
 
+type DbTransactionExecutor = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function insertDbTransactionWithLedger(
+  trx: DbTransactionExecutor,
+  tx: TransactionWithLedger
+): Promise<{ dbTxId: string; dbUserId: string; dbAccountId: string }> {
+  const dbTxId = toUuid(tx.id);
+  const dbUserId = toUuid(tx.userId);
+  const dbAccountId = toUuid(tx.accountId);
+
+  await trx.insert(transactions).values({
+    id: dbTxId,
+    userId: dbUserId,
+    accountId: dbAccountId,
+    importBatchId: tx.importBatchId ? toUuid(tx.importBatchId) : null,
+    date: tx.date,
+    postedDate: tx.postedDate || tx.date,
+    amount: tx.amount,
+    currency: tx.currency,
+    merchant: tx.merchant || null,
+    cleanDescription: tx.cleanDescription,
+    rawDescription: tx.rawDescription,
+    status: tx.status,
+    isSplit: tx.isSplit,
+    isReversal: tx.isReversal,
+    reversesTransactionId: tx.reversesTransactionId
+      ? toUuid(tx.reversesTransactionId)
+      : null,
+    reversalReason: tx.reversalReason || null,
+    deduplicationHash: tx.deduplicationHash || null,
+    notes: tx.notes || null,
+    createdAt: new Date(tx.createdAt),
+  });
+
+  if (tx.ledgerEntries.length > 0) {
+    await trx.insert(ledgerEntries).values(
+      tx.ledgerEntries.map((le) => ({
+        id: toUuid(le.id),
+        transactionId: dbTxId,
+        accountId: dbAccountId,
+        categoryId: le.categoryId ? toUuid(le.categoryId) : null,
+        entryType: le.entryType,
+        amount: le.amount,
+        description: le.description || null,
+        isReversal: le.isReversal,
+        reversedEntryId: le.reversedEntryId ? toUuid(le.reversedEntryId) : null,
+        sequenceIndex: le.sequenceIndex,
+      }))
+    );
+  }
+
+  await trx
+    .update(accounts)
+    .set({
+      currentBalance: sql`${accounts.currentBalance} + ${tx.amount}::numeric`,
+      updatedAt: new Date(),
+    })
+    .where(eq(accounts.id, dbAccountId));
+
+  return { dbTxId, dbUserId, dbAccountId };
+}
+
+function applyInMemoryAccountBalanceDelta(
+  userId: string,
+  accountId: string,
+  amountStr: string
+): void {
+  const account = inMemoryAccounts.find(
+    (a) => a.id === accountId && a.userId === userId
+  );
+  if (account) {
+    const nextBalance =
+      (parseFloat(account.currentBalance) || 0) + (parseFloat(amountStr) || 0);
+    account.currentBalance = nextBalance.toFixed(2);
+  }
+}
+
 export const store = {
   isDbReady,
 
@@ -1824,60 +1901,8 @@ export const store = {
 
   addTransaction: async (tx: TransactionWithLedger): Promise<void> => {
     if (await isDbReady()) {
-      const dbTxId = toUuid(tx.id);
-      const dbUserId = toUuid(tx.userId);
-      const dbAccountId = toUuid(tx.accountId);
-
       await db.transaction(async (trx) => {
-        await trx.insert(transactions).values({
-          id: dbTxId,
-          userId: dbUserId,
-          accountId: dbAccountId,
-          importBatchId: tx.importBatchId ? toUuid(tx.importBatchId) : null,
-          date: tx.date,
-          postedDate: tx.postedDate || tx.date,
-          amount: tx.amount,
-          currency: tx.currency,
-          merchant: tx.merchant || null,
-          cleanDescription: tx.cleanDescription,
-          rawDescription: tx.rawDescription,
-          status: tx.status,
-          isSplit: tx.isSplit,
-          isReversal: tx.isReversal,
-          reversesTransactionId: tx.reversesTransactionId
-            ? toUuid(tx.reversesTransactionId)
-            : null,
-          reversalReason: tx.reversalReason || null,
-          deduplicationHash: tx.deduplicationHash || null,
-          notes: tx.notes || null,
-          createdAt: new Date(tx.createdAt),
-        });
-
-        if (tx.ledgerEntries.length > 0) {
-          await trx.insert(ledgerEntries).values(
-            tx.ledgerEntries.map((le) => ({
-              id: toUuid(le.id),
-              transactionId: dbTxId,
-              accountId: dbAccountId,
-              categoryId: le.categoryId ? toUuid(le.categoryId) : null,
-              entryType: le.entryType,
-              amount: le.amount,
-              description: le.description || null,
-              isReversal: le.isReversal,
-              reversedEntryId: le.reversedEntryId ? toUuid(le.reversedEntryId) : null,
-              sequenceIndex: le.sequenceIndex,
-            }))
-          );
-        }
-
-        await trx
-          .update(accounts)
-          .set({
-            currentBalance: sql`${accounts.currentBalance} + ${tx.amount}::numeric`,
-            updatedAt: new Date(),
-          })
-          .where(eq(accounts.id, dbAccountId));
-
+        const { dbTxId, dbUserId } = await insertDbTransactionWithLedger(trx, tx);
         await trx.insert(auditLogs).values({
           id: crypto.randomUUID(),
           userId: dbUserId,
@@ -1891,14 +1916,7 @@ export const store = {
     }
 
     inMemoryTransactions.unshift(tx);
-
-    const account = inMemoryAccounts.find(
-      (a) => a.id === tx.accountId && a.userId === tx.userId
-    );
-    if (account) {
-      const nextBalance = (parseFloat(account.currentBalance) || 0) + (parseFloat(tx.amount) || 0);
-      account.currentBalance = nextBalance.toFixed(2);
-    }
+    applyInMemoryAccountBalanceDelta(tx.userId, tx.accountId, tx.amount);
 
     inMemoryAuditLogs.unshift({
       id: crypto.randomUUID(),
@@ -1936,6 +1954,101 @@ export const store = {
     if (tx) {
       tx.status = "reversed";
     }
+  },
+
+  replaceTransactionImmutably: async (params: {
+    originalTransactionId: string;
+    reversalTx: TransactionWithLedger;
+    replacementTx: TransactionWithLedger;
+    editReason: string;
+  }): Promise<void> => {
+    const { originalTransactionId, reversalTx, replacementTx, editReason } = params;
+
+    if (await isDbReady()) {
+      const dbOrigId = toUuid(originalTransactionId);
+      const dbUserId = toUuid(replacementTx.userId);
+
+      await db.transaction(async (trx) => {
+        const updatedOrig = await trx
+          .update(transactions)
+          .set({ status: "reversed", updatedAt: new Date() })
+          .where(
+            and(
+              eq(transactions.id, dbOrigId),
+              eq(transactions.userId, dbUserId),
+              eq(transactions.status, "posted"),
+              eq(transactions.isReversal, false)
+            )
+          )
+          .returning({ id: transactions.id });
+
+        if (updatedOrig.length === 0) {
+          throw new Error("Original transaction is already reversed or unavailable for edit.");
+        }
+
+        const revInserted = await insertDbTransactionWithLedger(trx, reversalTx);
+        await trx.insert(auditLogs).values({
+          id: crypto.randomUUID(),
+          userId: revInserted.dbUserId,
+          entityType: "transaction",
+          entityId: revInserted.dbTxId,
+          action: "REVERSAL",
+          previousState: { reversesTransactionId: originalTransactionId },
+          reason: editReason,
+          timestamp: new Date(reversalTx.createdAt),
+        });
+
+        const repInserted = await insertDbTransactionWithLedger(trx, replacementTx);
+        await trx.insert(auditLogs).values({
+          id: crypto.randomUUID(),
+          userId: repInserted.dbUserId,
+          entityType: "transaction",
+          entityId: repInserted.dbTxId,
+          action: "EDIT",
+          previousState: { replacedTransactionId: originalTransactionId },
+          reason: editReason,
+          timestamp: new Date(replacementTx.createdAt),
+        });
+      });
+      return;
+    }
+
+    const orig = inMemoryTransactions.find(
+      (t) => t.id === originalTransactionId && t.userId === replacementTx.userId
+    );
+    if (!orig || orig.status !== "posted" || orig.isReversal) {
+      throw new Error("Original transaction is already reversed or unavailable for edit.");
+    }
+
+    orig.status = "reversed";
+
+    inMemoryTransactions.unshift(reversalTx);
+    applyInMemoryAccountBalanceDelta(reversalTx.userId, reversalTx.accountId, reversalTx.amount);
+    inMemoryAuditLogs.unshift({
+      id: crypto.randomUUID(),
+      userId: reversalTx.userId,
+      entityType: "transaction",
+      entityId: reversalTx.id,
+      action: "REVERSAL",
+      reason: editReason,
+      timestamp: reversalTx.createdAt,
+    });
+
+    inMemoryTransactions.unshift(replacementTx);
+    applyInMemoryAccountBalanceDelta(
+      replacementTx.userId,
+      replacementTx.accountId,
+      replacementTx.amount
+    );
+    inMemoryAuditLogs.unshift({
+      id: crypto.randomUUID(),
+      userId: replacementTx.userId,
+      entityType: "transaction",
+      entityId: replacementTx.id,
+      action: "EDIT",
+      reason: editReason,
+      timestamp: replacementTx.createdAt,
+    });
   },
 
   hasDeduplicationHash: async (

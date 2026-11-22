@@ -50,9 +50,12 @@ import {
 } from "@/lib/rule-engine";
 import {
   createTransactionAction,
+  editTransactionAction,
   reverseTransactionAction,
   getAccountsAction,
+  getCategoriesAction,
   getTransactionsAction,
+  getTransactionsPageDataAction,
 } from "@/actions/transactions";
 import { getBudgetsAction } from "@/actions/budgets";
 import { getSubscriptionsAction } from "@/actions/subscriptions";
@@ -997,6 +1000,203 @@ describe("Cash Flow Forecasting & Scheduled Items", () => {
     expect(afterReset.scheduledItems).toHaveLength(0);
     expect(afterReset.projection30.scheduledIncomeCount).toBe(0);
     expect(afterReset.projection30.endingBalance).toBe(0);
+
+    setTestSession(undefined);
+  });
+});
+
+describe("Transactions Separation & Immutable Edit / Ledger Hash Audit", () => {
+  it("keeps active transactions separate from reversal history, supports immutable edits across accounts/categories/splits, and assigns SHA-256 hashes", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    const setupRes = await setupInitialAdminAction({
+      name: "Ledger Auditor",
+      email: "auditor@corecapital.local",
+      password: "AuditorPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "demo",
+    });
+    expect(setupRes.success).toBe(true);
+
+    const [accountsBefore, categories, budgetsBefore] = await Promise.all([
+      getAccountsAction(),
+      getCategoriesAction(),
+      getBudgetsAction(),
+    ]);
+    const checking = accountsBefore.find((a) => a.accountType === "checking")!;
+    const savings = accountsBefore.find((a) => a.accountType === "savings")!;
+    const groceriesCat = categories.find((c) => c.slug === "groceries")!;
+    const diningCat = categories.find((c) => c.slug === "dining")!;
+
+    const initialCheckingBal = parseFloat(checking.currentBalance);
+    const initialSavingsBal = parseFloat(savings.currentBalance);
+    const initialGroceriesSpent = budgetsBefore.find(
+      (b) => b.categoryId === groceriesCat.id
+    )!.spentAmount;
+    const initialDiningSpent = budgetsBefore.find(
+      (b) => b.categoryId === diningCat.id
+    )!.spentAmount;
+
+    // 1. Create and reverse a transaction -> reversal gets 64-char SHA-256 hash and leaves active list clean
+    const txARes = await createTransactionAction({
+      accountId: checking.id,
+      date: "2026-11-20",
+      amount: -100,
+      cleanDescription: "Duplicate Groceries Charge",
+      categoryId: groceriesCat.id,
+    });
+    expect(txARes.success).toBe(true);
+    const txAId = txARes.transaction!.id;
+
+    const revARes = await reverseTransactionAction(txAId, "Duplicate merchant charge");
+    expect(revARes.success).toBe(true);
+    expect(revARes.reversalTransaction?.deduplicationHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const afterRevPage = await getTransactionsPageDataAction();
+    const activeAfterRev = afterRevPage.transactions.filter(
+      (t) => t.status === "posted" && !t.isReversal
+    );
+    expect(activeAfterRev.some((t) => t.id === txAId)).toBe(false);
+    expect(
+      activeAfterRev.some((t) => t.id === revARes.reversalTransaction!.id)
+    ).toBe(false);
+    expect(afterRevPage.transactions.some((t) => t.id === txAId && t.status === "reversed")).toBe(
+      true
+    );
+    expect(
+      afterRevPage.transactions.every((t) => /^[0-9a-f]{64}$/.test(t.deduplicationHash || ""))
+    ).toBe(true);
+
+    // 2. Create txB on checking + groceries, then immutably edit to savings + dining + new amount
+    const txBRes = await createTransactionAction({
+      accountId: checking.id,
+      date: "2026-11-21",
+      amount: -80,
+      cleanDescription: "Original Cafe Purchase",
+      categoryId: groceriesCat.id,
+    });
+    expect(txBRes.success).toBe(true);
+    const txBId = txBRes.transaction!.id;
+
+    const editRes = await editTransactionAction({
+      transactionId: txBId,
+      accountId: savings.id,
+      date: "2026-11-21",
+      amount: -120,
+      cleanDescription: "Edited Bistro Dinner",
+      merchant: "Bistro Adelaide",
+      categoryId: diningCat.id,
+      notes: "Paid from savings",
+      editReason: "Corrected account, category, and receipt total",
+    });
+    expect(editRes.success).toBe(true);
+    expect(editRes.transaction).toBeDefined();
+    expect(editRes.reversalTransaction?.deduplicationHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(editRes.transaction?.deduplicationHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const [accountsAfterEdit, budgetsAfterEdit, pageAfterEdit] = await Promise.all([
+      getAccountsAction(),
+      getBudgetsAction(),
+      getTransactionsPageDataAction(),
+    ]);
+    expect(
+      parseFloat(accountsAfterEdit.find((a) => a.id === checking.id)!.currentBalance)
+    ).toBeCloseTo(initialCheckingBal, 2);
+    expect(
+      parseFloat(accountsAfterEdit.find((a) => a.id === savings.id)!.currentBalance)
+    ).toBeCloseTo(initialSavingsBal - 120, 2);
+    expect(
+      budgetsAfterEdit.find((b) => b.categoryId === groceriesCat.id)!.spentAmount
+    ).toBeCloseTo(initialGroceriesSpent, 2);
+    expect(
+      budgetsAfterEdit.find((b) => b.categoryId === diningCat.id)!.spentAmount
+    ).toBeCloseTo(initialDiningSpent + 120, 2);
+
+    const activeAfterEdit = pageAfterEdit.transactions.filter(
+      (t) => t.status === "posted" && !t.isReversal
+    );
+    expect(activeAfterEdit.some((t) => t.id === txBId)).toBe(false);
+    expect(activeAfterEdit.some((t) => t.id === editRes.reversalTransaction!.id)).toBe(false);
+    expect(
+      activeAfterEdit.some(
+        (t) => t.id === editRes.transaction!.id && t.cleanDescription === "Edited Bistro Dinner"
+      )
+    ).toBe(true);
+
+    expect(
+      pageAfterEdit.auditLogs.some(
+        (l) => l.entityId === editRes.reversalTransaction!.id && l.action === "REVERSAL"
+      )
+    ).toBe(true);
+    expect(
+      pageAfterEdit.auditLogs.some(
+        (l) => l.entityId === editRes.transaction!.id && l.action === "EDIT"
+      )
+    ).toBe(true);
+
+    // 3. Edit replacement into a balanced split transaction
+    const splitEditRes = await editTransactionAction({
+      transactionId: editRes.transaction!.id,
+      accountId: savings.id,
+      date: "2026-11-21",
+      amount: -120,
+      cleanDescription: "Split Grocery & Bistro",
+      isSplit: true,
+      splits: [
+        { categoryId: groceriesCat.id, amount: 70, description: "Groceries share" },
+        { categoryId: diningCat.id, amount: 50, description: "Dining share" },
+      ],
+      editReason: "Split receipt across groceries and dining",
+    });
+    expect(splitEditRes.success).toBe(true);
+    expect(splitEditRes.transaction?.isSplit).toBe(true);
+    expect(splitEditRes.transaction?.ledgerEntries).toHaveLength(2);
+
+    const budgetsAfterSplit = await getBudgetsAction();
+    expect(
+      budgetsAfterSplit.find((b) => b.categoryId === groceriesCat.id)!.spentAmount
+    ).toBeCloseTo(initialGroceriesSpent + 70, 2);
+    expect(
+      budgetsAfterSplit.find((b) => b.categoryId === diningCat.id)!.spentAmount
+    ).toBeCloseTo(initialDiningSpent + 50, 2);
+
+    // 4. Reject unbalanced split, editing reversed tx, and editing reversal entry
+    const unbalancedEdit = await editTransactionAction({
+      transactionId: splitEditRes.transaction!.id,
+      accountId: savings.id,
+      date: "2026-11-21",
+      amount: -120,
+      cleanDescription: "Bad Split",
+      isSplit: true,
+      splits: [
+        { categoryId: groceriesCat.id, amount: 60 },
+        { categoryId: diningCat.id, amount: 40 },
+      ],
+    });
+    expect(unbalancedEdit.success).toBe(false);
+    expect(unbalancedEdit.error).toContain("Split sum");
+
+    const editReversed = await editTransactionAction({
+      transactionId: txBId,
+      accountId: checking.id,
+      date: "2026-11-21",
+      amount: -50,
+      cleanDescription: "Should Fail",
+      categoryId: groceriesCat.id,
+    });
+    expect(editReversed.success).toBe(false);
+    expect(editReversed.error).toContain("reversed");
+
+    const editReversal = await editTransactionAction({
+      transactionId: editRes.reversalTransaction!.id,
+      accountId: checking.id,
+      date: "2026-11-21",
+      amount: 80,
+      cleanDescription: "Should Fail",
+      categoryId: groceriesCat.id,
+    });
+    expect(editReversal.success).toBe(false);
+    expect(editReversal.error).toContain("reversal");
 
     setTestSession(undefined);
   });
