@@ -59,7 +59,7 @@ export function Sidebar({ user }: { user: SafeUser }) {
   return (
     <aside className="hidden lg:flex w-64 flex-col border-r bg-card/60 backdrop-blur-xl h-screen sticky top-0 shrink-0 select-none">
       {/* Brand Header */}
-      <div className="h-16 flex items-center px-6 border-b justify-between">
+      <div className="h-16 shrink-0 flex items-center px-6 border-b justify-between">
         <Link href="/" className="flex items-center gap-2.5 font-bold text-lg tracking-tight">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-sky-600 via-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-sky-500/20">
             <Sparkles className="h-4 w-4" />
@@ -115,8 +115,10 @@ export function Sidebar({ user }: { user: SafeUser }) {
         ))}
       </div>
 
-      {/* Infrastructure & Active User Node Status */}
-      <div className="p-4 border-t bg-muted/20 space-y-2.5">
+      {/* Theme Switcher & Active User Node Status */}
+      <div className="p-4 border-t bg-muted/20 space-y-2.5 shrink-0">
+        <ThemeToggle variant="sidebar" />
+
         <div className="rounded-lg border bg-background/60 p-3 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 min-w-0">
@@ -139,8 +141,6 @@ export function Sidebar({ user }: { user: SafeUser }) {
             <span>Immutable Ledger Active</span>
           </div>
         </div>
-
-        <ThemeToggle variant="sidebar" />
       </div>
     </aside>
   );
