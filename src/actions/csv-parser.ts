@@ -8,7 +8,11 @@ import {
   computeFileHash,
   SupportedBankFormat,
 } from "@/lib/csv-engine";
-import { findMatchingRule } from "@/lib/rule-engine";
+import {
+  findMatchingRule,
+  generateRuleSuggestions,
+  type RuleSuggestion,
+} from "@/lib/rule-engine";
 import { formatCategoryDisplayLabel } from "@/lib/category-utils";
 
 export interface ImportCsvResult {
@@ -18,6 +22,8 @@ export interface ImportCsvResult {
   totalRows?: number;
   importedCount?: number;
   duplicateCount?: number;
+  unclassifiedCount?: number;
+  suggestions?: RuleSuggestion[];
   error?: string;
 }
 
@@ -57,6 +63,7 @@ export async function importBankStatementCsvAction(formData: FormData): Promise<
 
     let importedCount = 0;
     let duplicateCount = 0;
+    let unclassifiedCount = 0;
 
     for (const row of parsedRows) {
       // Check deduplication hash
@@ -73,6 +80,8 @@ export async function importBankStatementCsvAction(formData: FormData): Promise<
 
       if (matchedRule) {
         await store.incrementRuleMatchCount(matchedRule.id);
+      } else {
+        unclassifiedCount++;
       }
 
       const txId = crypto.randomUUID();
@@ -138,7 +147,19 @@ export async function importBankStatementCsvAction(formData: FormData): Promise<
     revalidatePath("/ingest");
     revalidatePath("/budgets");
     revalidatePath("/rules");
+    revalidatePath("/accounts");
     revalidatePath("/");
+
+    const [updatedTransactions, updatedRules] = await Promise.all([
+      store.getTransactions(),
+      store.getRules(),
+    ]);
+    const suggestions = generateRuleSuggestions({
+      transactions: updatedTransactions,
+      rules: updatedRules,
+      categories,
+      onlyBatchId: batchId,
+    });
 
     return {
       success: true,
@@ -147,6 +168,8 @@ export async function importBankStatementCsvAction(formData: FormData): Promise<
       totalRows: parsedRows.length,
       importedCount,
       duplicateCount,
+      unclassifiedCount,
+      suggestions,
     };
   } catch (error: any) {
     return { success: false, error: error?.message || "Failed to process bank statement." };

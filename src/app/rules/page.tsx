@@ -1,14 +1,18 @@
-import { getClassificationRulesAction } from "@/actions/rules";
+import {
+  getClassificationRulesAction,
+  getRuleSuggestionsAction,
+} from "@/actions/rules";
 import { getCategoriesAction, getTransactionsAction } from "@/actions/transactions";
 import { RulesView, RulePreviewTransaction } from "@/components/rules/rules-view";
 
 export const dynamic = "force-dynamic";
 
 export default async function RulesPage() {
-  const [rules, categories, transactions] = await Promise.all([
+  const [rules, categories, transactions, suggestions] = await Promise.all([
     getClassificationRulesAction(),
     getCategoriesAction(),
     getTransactionsAction(),
+    getRuleSuggestionsAction(),
   ]);
 
   const recentTransactions: RulePreviewTransaction[] = transactions
@@ -30,6 +34,7 @@ export default async function RulesPage() {
       initialRules={rules}
       categories={categories}
       recentTransactions={recentTransactions}
+      initialSuggestions={suggestions}
     />
   );
 }

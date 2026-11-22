@@ -11,6 +11,10 @@ import {
 } from "@/lib/store";
 import { computeDeduplicationHash } from "@/lib/csv-engine";
 import { formatCategoryDisplayLabel } from "@/lib/category-utils";
+import {
+  buildSingleTransactionRuleSuggestion,
+  type LearnOnEditSuggestion,
+} from "@/lib/rule-engine";
 
 export interface SplitItemInput {
   categoryId: string;
@@ -313,7 +317,22 @@ export async function createTransactionAction(input: CreateTransactionInput) {
     await store.addTransaction(newTransaction);
     revalidateLedgerDependentPaths();
 
-    return { success: true, transaction: newTransaction };
+    let ruleSuggestion: LearnOnEditSuggestion | null = null;
+    if (!useSplit && categoryId) {
+      const [rules, allTransactions] = await Promise.all([
+        store.getRules(),
+        store.getTransactions(),
+      ]);
+      ruleSuggestion = buildSingleTransactionRuleSuggestion({
+        transaction: newTransaction,
+        categoryId,
+        transactions: allTransactions,
+        rules,
+        categories,
+      });
+    }
+
+    return { success: true, transaction: newTransaction, ruleSuggestion };
   } catch (error: any) {
     return { success: false, error: error?.message || "Failed to log transaction." };
   }
@@ -480,11 +499,27 @@ export async function editTransactionAction(input: EditTransactionInput) {
 
     revalidateLedgerDependentPaths();
 
+    let ruleSuggestion: LearnOnEditSuggestion | null = null;
+    if (!isSplit && categoryId) {
+      const [rules, allTransactions] = await Promise.all([
+        store.getRules(),
+        store.getTransactions(),
+      ]);
+      ruleSuggestion = buildSingleTransactionRuleSuggestion({
+        transaction: replacementTx,
+        categoryId,
+        transactions: allTransactions,
+        rules,
+        categories,
+      });
+    }
+
     return {
       success: true,
       transaction: replacementTx,
       reversalTransaction: reversalTx,
       originalTransactionId: originalTx.id,
+      ruleSuggestion,
     };
   } catch (error: any) {
     return { success: false, error: error?.message || "Failed to edit transaction." };

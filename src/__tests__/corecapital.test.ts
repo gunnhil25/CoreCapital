@@ -46,8 +46,13 @@ import {
 import {
   evaluateRuleMatch,
   findMatchingRule,
+  normalizeMerchantPattern,
+  generateRuleSuggestions,
   ClassificationRuleItem,
 } from "@/lib/rule-engine";
+import {
+  importBankStatementCsvAction,
+} from "@/actions/csv-parser";
 import {
   createTransactionAction,
   editTransactionAction,
@@ -69,6 +74,9 @@ import {
   createClassificationRuleAction,
   deleteClassificationRuleAction,
   getClassificationRulesAction,
+  getRuleSuggestionsAction,
+  acceptRuleSuggestionAction,
+  acceptBulkRuleSuggestionsAction,
   runClassificationRulesAction,
   toggleClassificationRuleAction,
   updateClassificationRuleAction,
@@ -1841,6 +1849,271 @@ describe("Sub-Category Enhancements: Drilldown Charts, Nested Budget Sub-Caps, R
     });
     expect(invalidServerMove.success).toBe(false);
     expect(invalidServerMove.error).toContain("same type");
+
+    setTestSession(undefined);
+  });
+});
+
+describe("Smart Rule Suggestions & Automated Ingestion Learning", () => {
+  it("normalizes noisy bank descriptions into canonical merchant patterns with boundary safety", () => {
+    const spotify = normalizeMerchantPattern({
+      rawDescription: "SPOTIFY P99123 SYDNEY NSW AUS",
+      cleanDescription: "SPOTIFY P99123",
+    });
+    expect(spotify).not.toBeNull();
+    expect(spotify?.key).toBe("spotify");
+    expect(spotify?.matchValue).toBe("spotify");
+    expect(spotify?.displayName).toBe("Spotify");
+
+    const amaysim = normalizeMerchantPattern({
+      rawDescription: "DIRECT DEBIT AMAYSIM MOBILE PTY LTD",
+      cleanDescription: "AMAYSIM MOBILE",
+    });
+    expect(amaysim).not.toBeNull();
+    expect(amaysim?.key).toBe("amaysim");
+    expect(amaysim?.matchValue).toBe("amaysim");
+    expect(amaysim?.displayName).toBe("Amaysim");
+
+    const roasters = normalizeMerchantPattern({
+      rawDescription: "VISA PURCHASE ADELAIDE ROASTERS 4821 SA AUS",
+      cleanDescription: "ADELAIDE ROASTERS 4821",
+    });
+    expect(roasters).not.toBeNull();
+    expect(roasters?.key).toBe("adelaide roasters");
+    expect(roasters?.matchValue).toBe("adelaide roasters");
+    expect(roasters?.signature).toBeNull();
+
+    // Short patterns ("iga", "bp", "otr") must not false-match inside longer unrelated words
+    const digitalOcean = normalizeMerchantPattern({
+      rawDescription: "DIGITAL OCEAN CLOUD HOSTING",
+      cleanDescription: "DIGITAL OCEAN CLOUD",
+    });
+    expect(digitalOcean).not.toBeNull();
+    expect(digitalOcean?.key).not.toBe("iga");
+    expect(digitalOcean?.key).toBe("digital ocean cloud");
+
+    // Compound signatures must beat generic prefixes
+    const uberEats = normalizeMerchantPattern({
+      rawDescription: "UBER *EATS PENDING SYDNEY NSW",
+      cleanDescription: "UBER EATS",
+    });
+    expect(uberEats?.key).toBe("uber-eats");
+
+    const aldiMobile = normalizeMerchantPattern({
+      rawDescription: "ALDIMOBILE RECHARGE 2099",
+      cleanDescription: "ALDIMOBILE RECHARGE",
+    });
+    expect(aldiMobile?.key).toBe("aldimobile");
+  });
+
+  it("suggests rules after CSV ingestion, prefers matching sub-categories, applies bulk & idempotently, and excludes already-ruled merchants", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    await setupInitialAdminAction({
+      name: "Suggestion Tester",
+      email: "suggest@corecapital.local",
+      password: "SuggestPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+
+    const accounts = await getAccountsAction();
+    const cats = await getCategoriesAction();
+    const utilitiesParent = cats.find((c) => c.name.includes("Utilities"))!;
+    expect(utilitiesParent).toBeDefined();
+
+    // Add a nested "Mobile" sub-category under Utilities & Telco
+    const mobileSubRes = await createCategoryAction({
+      name: "Mobile",
+      type: "expense",
+      color: "#06b6d4",
+      parentId: utilitiesParent.id,
+    });
+    expect(mobileSubRes.success).toBe(true);
+    const mobileSub = mobileSubRes.category!;
+
+    const subsCat = cats.find((c) => c.name.includes("Subscriptions"))!;
+    expect(subsCat).toBeDefined();
+
+    const csvText = [
+      "Date,Description,Amount",
+      "2026-10-01,SPOTIFY AUSTRALIA SYDNEY,-13.99",
+      "2026-11-01,SPOTIFY AUSTRALIA SYDNEY,-13.99",
+      "2026-10-05,DIRECT DEBIT AMAYSIM MOBILE PTY LTD,-30.00",
+      "2026-11-05,DIRECT DEBIT AMAYSIM MOBILE PTY LTD,-30.00",
+      "2026-11-08,VISA PURCHASE ADELAIDE ROASTERS 4821 SA AUS,-14.50",
+      "2026-11-12,VISA PURCHASE ADELAIDE ROASTERS 4822 SA AUS,-16.00",
+      "2026-11-15,WOOLWORTHS METRO ADELAIDE,-65.40",
+    ].join("\n");
+
+    const formData = new FormData();
+    formData.set("file", new File([csvText], "commbank-oct-nov.csv", { type: "text/csv" }));
+    formData.set("accountId", accounts[0].id);
+    formData.set("bankFormat", "auto");
+
+    const importRes = await importBankStatementCsvAction(formData);
+    expect(importRes.success).toBe(true);
+    expect(importRes.importedCount).toBe(7);
+    expect(importRes.unclassifiedCount).toBe(6);
+
+    const suggestions = importRes.suggestions || [];
+    // Woolworths already has default rule rul-1, so must NOT appear in suggestions
+    expect(suggestions.some((s) => s.matchValue.includes("woolworths"))).toBe(false);
+
+    const spotifySugg = suggestions.find((s) => s.matchValue === "spotify");
+    expect(spotifySugg).toBeDefined();
+    expect(spotifySugg?.suggestedCategoryId).toBe(subsCat.id);
+    expect(spotifySugg?.source).toBe("merchant_directory");
+    expect(spotifySugg?.confidence).toBe("high");
+    expect(spotifySugg?.occurrenceCount).toBe(2);
+
+    const amaysimSugg = suggestions.find((s) => s.matchValue === "amaysim");
+    expect(amaysimSugg).toBeDefined();
+    expect(amaysimSugg?.suggestedCategoryId).toBe(mobileSub.id);
+    expect(amaysimSugg?.suggestedPriority).toBe(25);
+    expect(amaysimSugg?.source).toBe("merchant_directory");
+
+    const roastersSugg = suggestions.find((s) => s.matchValue === "adelaide roasters");
+    expect(roastersSugg).toBeDefined();
+    expect(roastersSugg?.source).toBe("repeated_pattern");
+    expect(roastersSugg?.confidence).toBe("low");
+    expect(roastersSugg?.suggestedCategoryId).toBeNull();
+    expect(roastersSugg?.occurrenceCount).toBe(2);
+
+    // Bulk approve ready suggestions (Spotify + Amaysim)
+    const bulkRes = await acceptBulkRuleSuggestionsAction([
+      {
+        name: spotifySugg!.suggestedRuleName,
+        matchValue: spotifySugg!.matchValue,
+        targetCategoryId: spotifySugg!.suggestedCategoryId!,
+        field: spotifySugg!.field,
+        priority: spotifySugg!.suggestedPriority,
+      },
+      {
+        name: amaysimSugg!.suggestedRuleName,
+        matchValue: amaysimSugg!.matchValue,
+        targetCategoryId: amaysimSugg!.suggestedCategoryId!,
+        field: amaysimSugg!.field,
+        priority: amaysimSugg!.suggestedPriority,
+      },
+    ]);
+    expect(bulkRes.success).toBe(true);
+    expect(bulkRes.createdCount).toBe(2);
+    expect(bulkRes.matchedCount).toBe(4);
+
+    // Idempotent re-accept must not duplicate existing rule
+    const dupRes = await acceptRuleSuggestionAction({
+      name: spotifySugg!.suggestedRuleName,
+      matchValue: spotifySugg!.matchValue,
+      targetCategoryId: spotifySugg!.suggestedCategoryId!,
+    });
+    expect(dupRes.success).toBe(true);
+    expect(dupRes.created).toBe(false);
+    expect(dupRes.matchedCount).toBe(0);
+
+    const updatedTxs = await getTransactionsAction();
+    const amaysimTxs = updatedTxs.filter((t) =>
+      t.cleanDescription.toLowerCase().includes("amaysim")
+    );
+    expect(amaysimTxs).toHaveLength(2);
+    expect(amaysimTxs.every((t) => t.ledgerEntries[0]?.categoryId === mobileSub.id)).toBe(true);
+
+    // Only Adelaide Roasters remains suggested
+    const remainingSuggs = await getRuleSuggestionsAction();
+    expect(remainingSuggs.some((s) => s.matchValue === "spotify")).toBe(false);
+    expect(remainingSuggs.some((s) => s.matchValue === "amaysim")).toBe(false);
+    expect(remainingSuggs.some((s) => s.matchValue === "adelaide roasters")).toBe(true);
+
+    setTestSession(undefined);
+  });
+
+  it("emits Learn-on-Edit suggestion on manual categorization/edit and learns from user history", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    await setupInitialAdminAction({
+      name: "Learn Tester",
+      email: "learn@corecapital.local",
+      password: "LearnPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+
+    const accounts = await getAccountsAction();
+    const cats = await getCategoriesAction();
+    const groceriesCat = cats.find((c) => c.name.includes("Groceries"))!;
+    const householdCat = cats.find((c) => c.name.includes("Household"))!;
+
+    // 1. Log uncategorized Local Butcher Shop twice, then categorize second to Groceries
+    const butcher1 = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-10",
+      amount: -42.0,
+      cleanDescription: "Local Butcher Shop",
+    });
+    expect(butcher1.success).toBe(true);
+    expect(butcher1.ruleSuggestion).toBeNull();
+
+    const butcher2 = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-17",
+      amount: -38.5,
+      cleanDescription: "Local Butcher Shop",
+      categoryId: groceriesCat.id,
+    });
+    expect(butcher2.success).toBe(true);
+    expect(butcher2.ruleSuggestion).not.toBeNull();
+    expect(butcher2.ruleSuggestion?.matchValue).toBe("local butcher shop");
+    expect(butcher2.ruleSuggestion?.targetCategoryId).toBe(groceriesCat.id);
+    expect(butcher2.ruleSuggestion?.alsoMatchesCount).toBeGreaterThanOrEqual(1);
+
+    // Editing a transaction also returns a Learn-on-Edit suggestion
+    const hardware1 = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-18",
+      amount: -55.0,
+      cleanDescription: "Corner Hardware Co",
+    });
+    const edited = await editTransactionAction({
+      transactionId: hardware1.transaction!.id,
+      accountId: accounts[0].id,
+      amount: -55.0,
+      date: "2026-11-18",
+      cleanDescription: "Corner Hardware Co",
+      categoryId: householdCat.id,
+    });
+    expect(edited.success).toBe(true);
+    expect(edited.ruleSuggestion).not.toBeNull();
+    expect(edited.ruleSuggestion?.matchValue).toBe("corner hardware");
+    expect(edited.ruleSuggestion?.targetCategoryId).toBe(householdCat.id);
+
+    // User history signal in bulk scanner: Local Butcher Shop should infer Groceries (source: "user_history")
+    const historySuggestions = await getRuleSuggestionsAction();
+    const butcherHistorySugg = historySuggestions.find(
+      (s) => s.matchValue === "local butcher shop"
+    );
+    expect(butcherHistorySugg).toBeDefined();
+    expect(butcherHistorySugg?.source).toBe("user_history");
+    expect(butcherHistorySugg?.confidence).toBe("high");
+    expect(butcherHistorySugg?.suggestedCategoryId).toBe(groceriesCat.id);
+
+    // Accepting the rule stops future Learn-on-Edit suggestions for that merchant
+    const acceptButcher = await acceptRuleSuggestionAction({
+      name: butcher2.ruleSuggestion!.suggestedRuleName,
+      matchValue: butcher2.ruleSuggestion!.matchValue,
+      targetCategoryId: groceriesCat.id,
+    });
+    expect(acceptButcher.success).toBe(true);
+    expect(acceptButcher.matchedCount).toBe(1); // Retroactively tagged butcher1
+
+    const butcher3 = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-21",
+      amount: -44.0,
+      cleanDescription: "Local Butcher Shop",
+      categoryId: groceriesCat.id,
+    });
+    expect(butcher3.success).toBe(true);
+    expect(butcher3.ruleSuggestion).toBeNull();
 
     setTestSession(undefined);
   });

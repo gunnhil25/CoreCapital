@@ -20,6 +20,8 @@ import {
   Search,
   ShieldAlert,
   Split,
+  Wand2,
+  X,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -37,6 +39,10 @@ import {
 } from "@/components/ui/table";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { sortAndFlattenCategories } from "@/lib/category-utils";
+import {
+  acceptRuleSuggestionAction,
+  type LearnOnEditSuggestion,
+} from "@/actions/rules";
 import {
   createTransactionAction,
   editTransactionAction,
@@ -151,6 +157,8 @@ export function TransactionsView({
     type: "success" | "error";
     text: string;
   } | null>(null);
+  const [learnSuggestion, setLearnSuggestion] =
+    useState<LearnOnEditSuggestion | null>(null);
 
   // Transactions tab filters & sort
   const [search, setSearch] = useState("");
@@ -522,6 +530,7 @@ export function TransactionsView({
     e.preventDefault();
     setModalError(null);
     setActionMessage(null);
+    setLearnSuggestion(null);
 
     const numAmount = parseFloat(amount);
     if (isNaN(numAmount) || numAmount <= 0) {
@@ -578,6 +587,7 @@ export function TransactionsView({
           await refreshPageData();
           setFormMode(null);
           setEditingTx(null);
+          setLearnSuggestion(res.ruleSuggestion || null);
           setActionMessage({
             type: "success",
             text: `Transaction updated. An offsetting reversal and replacement entry were recorded in the Immutable Ledger.`,
@@ -603,12 +613,45 @@ export function TransactionsView({
       if (res.success && res.transaction) {
         await refreshPageData();
         setFormMode(null);
+        setLearnSuggestion(res.ruleSuggestion || null);
         setActionMessage({
           type: "success",
           text: "Transaction logged to ledger.",
         });
       } else {
         setModalError(res.error || "Failed to create transaction.");
+      }
+    });
+  };
+
+  const handleAcceptLearnSuggestion = () => {
+    if (!learnSuggestion) return;
+    const target = learnSuggestion;
+    setActionMessage(null);
+
+    startTransition(async () => {
+      const res = await acceptRuleSuggestionAction({
+        name: target.suggestedRuleName,
+        matchValue: target.matchValue,
+        targetCategoryId: target.targetCategoryId,
+        priority: target.suggestedPriority,
+        applyToExisting: true,
+      });
+      if (res.success) {
+        await refreshPageData();
+        setLearnSuggestion(null);
+        setActionMessage({
+          type: "success",
+          text: `Automated rule "${target.suggestedRuleName}" saved (${
+            res.matchedCount ?? 0
+          } matching entries tagged).`,
+        });
+        router.refresh();
+      } else {
+        setActionMessage({
+          type: "error",
+          text: res.error || "Failed to create automated rule.",
+        });
       }
     });
   };
@@ -682,6 +725,57 @@ export function TransactionsView({
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {/* Learn-on-Edit Automated Rule Banner */}
+      {learnSuggestion && (
+        <div className="p-3.5 rounded-lg border border-primary/30 bg-primary/5 text-xs sm:text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+            <Wand2 className="h-4 w-4 text-primary shrink-0 mt-0.5 sm:mt-0" />
+            <div className="min-w-0">
+              <span>
+                Automate future entries: Always categorize{" "}
+                <strong>{learnSuggestion.merchantDisplay}</strong> (
+                <code className="font-mono text-primary">
+                  contains &ldquo;{learnSuggestion.matchValue}&rdquo;
+                </code>
+                ) as <strong>{learnSuggestion.targetCategoryLabel}</strong>?
+              </span>
+              {learnSuggestion.alsoMatchesCount > 0 && (
+                <span className="block sm:inline sm:ml-1.5 text-xs text-muted-foreground">
+                  Also tags {learnSuggestion.alsoMatchesCount} other matching{" "}
+                  {learnSuggestion.alsoMatchesCount === 1
+                    ? "transaction"
+                    : "transactions"}
+                  .
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              type="button"
+              size="sm"
+              disabled={isPending}
+              onClick={handleAcceptLearnSuggestion}
+              className="h-8 text-xs gap-1"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Create Rule &amp; Apply
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+              aria-label="Dismiss rule suggestion"
+              onClick={() => setLearnSuggestion(null)}
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
       )}
 

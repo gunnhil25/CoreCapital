@@ -14,6 +14,9 @@ import {
   CornerDownRight,
   GitBranch,
   Sparkles,
+  RefreshCw,
+  Wand2,
+  X,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -29,11 +32,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  acceptBulkRuleSuggestionsAction,
+  acceptRuleSuggestionAction,
   createClassificationRuleAction,
   deleteClassificationRuleAction,
+  getRuleSuggestionsAction,
   runClassificationRulesAction,
   toggleClassificationRuleAction,
   updateClassificationRuleAction,
+  type RuleSuggestion,
 } from "@/actions/rules";
 import { evaluateRuleMatch } from "@/lib/rule-engine";
 import { sortAndFlattenCategories } from "@/lib/category-utils";
@@ -71,6 +78,7 @@ interface RulesViewProps {
     sortOrder?: number;
   }>;
   recentTransactions?: RulePreviewTransaction[];
+  initialSuggestions?: RuleSuggestion[];
 }
 
 const SELECT_CLS =
@@ -80,6 +88,7 @@ export function RulesView({
   initialRules,
   categories,
   recentTransactions = [],
+  initialSuggestions = [],
 }: RulesViewProps) {
   const router = useRouter();
   const orderedCategories = useMemo(
@@ -87,6 +96,9 @@ export function RulesView({
     [categories]
   );
   const [rules, setRules] = useState<RuleItem[]>(initialRules);
+  const [suggestions, setSuggestions] = useState<RuleSuggestion[]>(initialSuggestions);
+  const [selectedSuggestionCats, setSelectedSuggestionCats] = useState<Record<string, string>>({});
+  const [dismissedSuggestionIds, setDismissedSuggestionIds] = useState<string[]>([]);
   const [isPending, startTransition] = useTransition();
   const [ruleModalMode, setRuleModalMode] = useState<"create" | "edit" | null>(null);
   const [editingRule, setEditingRule] = useState<RuleItem | null>(null);
@@ -310,7 +322,110 @@ export function RulesView({
           type: "success",
           text: `Rule "${res.rule.name}" created and active!`,
         });
+        const refreshedSuggestions = await getRuleSuggestionsAction();
+        setSuggestions(refreshedSuggestions);
         router.refresh();
+      }
+    });
+  };
+
+  const visibleSuggestions = suggestions.filter(
+    (s) => !dismissedSuggestionIds.includes(s.id)
+  );
+  const getSuggestionCategoryId = (s: RuleSuggestion) =>
+    selectedSuggestionCats[s.id] !== undefined
+      ? selectedSuggestionCats[s.id]
+      : s.suggestedCategoryId || "";
+  const readySuggestions = visibleSuggestions.filter((s) =>
+    Boolean(getSuggestionCategoryId(s))
+  );
+
+  const handleScanSuggestions = () => {
+    setFeedback(null);
+    startTransition(async () => {
+      const next = await getRuleSuggestionsAction();
+      setSuggestions(next);
+      setDismissedSuggestionIds([]);
+      setFeedback({
+        type: "success",
+        text:
+          next.length > 0
+            ? `Scanned ledger: found ${next.length} automated rule ${
+                next.length === 1 ? "suggestion" : "suggestions"
+              }.`
+            : "Scanned ledger: all recurring & recognized merchants already have active rules!",
+      });
+    });
+  };
+
+  const handleAcceptSuggestion = (s: RuleSuggestion) => {
+    const catId = getSuggestionCategoryId(s);
+    if (!catId) return;
+    setFeedback(null);
+
+    startTransition(async () => {
+      const res = await acceptRuleSuggestionAction({
+        name: s.suggestedRuleName,
+        matchValue: s.matchValue,
+        targetCategoryId: catId,
+        field: s.field,
+        priority: s.suggestedPriority,
+        applyToExisting: true,
+      });
+      if (res.success && res.rules) {
+        setRules(res.rules);
+        if (res.suggestions) {
+          setSuggestions(res.suggestions);
+        } else {
+          setDismissedSuggestionIds((prev) => [...prev, s.id]);
+        }
+        setFeedback({
+          type: "success",
+          text: `Added rule "${s.suggestedRuleName}" and auto-tagged ${
+            res.matchedCount ?? 0
+          } matching entries.`,
+        });
+        router.refresh();
+      } else {
+        setFeedback({
+          type: "error",
+          text: res.error || "Failed to add suggested rule.",
+        });
+      }
+    });
+  };
+
+  const handleAcceptAllSuggestions = () => {
+    if (readySuggestions.length === 0) return;
+    setFeedback(null);
+
+    startTransition(async () => {
+      const res = await acceptBulkRuleSuggestionsAction(
+        readySuggestions.map((s) => ({
+          name: s.suggestedRuleName,
+          matchValue: s.matchValue,
+          targetCategoryId: getSuggestionCategoryId(s),
+          field: s.field,
+          priority: s.suggestedPriority,
+        }))
+      );
+      if (res.success && res.rules) {
+        setRules(res.rules);
+        if (res.suggestions) {
+          setSuggestions(res.suggestions);
+        }
+        setFeedback({
+          type: "success",
+          text: `Approved ${res.createdCount ?? 0} suggested rules and auto-tagged ${
+            res.matchedCount ?? 0
+          } transactions!`,
+        });
+        router.refresh();
+      } else {
+        setFeedback({
+          type: "error",
+          text: res.error || "Failed to approve suggestions.",
+        });
       }
     });
   };
@@ -328,6 +443,8 @@ export function RulesView({
           type: "success",
           text: `Deleted rule "${removedName}".`,
         });
+        const refreshedSuggestions = await getRuleSuggestionsAction();
+        setSuggestions(refreshedSuggestions);
         router.refresh();
       } else {
         setFeedback({
@@ -351,6 +468,17 @@ export function RulesView({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleScanSuggestions}
+            disabled={isPending}
+            className="gap-1.5"
+            title="Scan transaction history for repeated or recognized merchants without rules"
+          >
+            <RefreshCw className="h-3.5 w-3.5 text-primary" />
+            Scan Suggestions
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -404,6 +532,125 @@ export function RulesView({
             ✕
           </button>
         </div>
+      )}
+
+      {/* Smart Rule Suggestions Panel */}
+      {visibleSuggestions.length > 0 && (
+        <Card className="border-primary/30 bg-gradient-to-br from-primary/5 via-card to-card overflow-hidden">
+          <CardHeader className="p-4 pb-3 border-b bg-muted/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Wand2 className="h-4 w-4 text-primary" />
+                Smart Rule Suggestions ({visibleSuggestions.length})
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Repeated &amp; recognized merchants detected from your transactions without an active rule yet
+              </CardDescription>
+            </div>
+            {readySuggestions.length > 0 && (
+              <Button
+                type="button"
+                size="sm"
+                disabled={isPending}
+                onClick={handleAcceptAllSuggestions}
+                className="gap-1.5 shrink-0"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Approve All Ready ({readySuggestions.length})
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="p-0 divide-y">
+            {visibleSuggestions.map((s) => {
+              const selectedCatId = getSuggestionCategoryId(s);
+              return (
+                <div
+                  key={s.id}
+                  className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 hover:bg-muted/20 transition-colors"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm">{s.merchantDisplay}</span>
+                      <code className="text-[11px] font-mono bg-muted px-1.5 py-0.5 rounded text-primary">
+                        contains &ldquo;{s.matchValue}&rdquo;
+                      </code>
+                      <Badge variant="outline" className="text-[10px] font-mono py-0">
+                        {s.occurrenceCount} {s.occurrenceCount === 1 ? "tx" : "txs"}
+                      </Badge>
+                      {s.isRecurring && (
+                        <Badge variant="info" className="text-[9px] font-mono py-0">
+                          Recurring
+                        </Badge>
+                      )}
+                      <Badge
+                        variant={
+                          s.confidence === "high"
+                            ? "success"
+                            : s.confidence === "medium"
+                            ? "secondary"
+                            : "warning"
+                        }
+                        className="text-[9px] font-mono py-0"
+                      >
+                        {s.confidence === "high"
+                          ? "High Confidence"
+                          : s.confidence === "medium"
+                          ? "Suggested"
+                          : "Choose Category"}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{s.reason}</p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <select
+                      aria-label={`Suggested category for ${s.merchantDisplay}`}
+                      value={selectedCatId}
+                      onChange={(e) =>
+                        setSelectedSuggestionCats((prev) => ({
+                          ...prev,
+                          [s.id]: e.target.value,
+                        }))
+                      }
+                      className="h-8 min-w-[190px] rounded-lg border border-input bg-background text-foreground px-2.5 text-xs"
+                    >
+                      <option value="">Select category...</option>
+                      {orderedCategories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={isPending || !selectedCatId}
+                      onClick={() => handleAcceptSuggestion(s)}
+                      className="h-8 text-xs gap-1"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add Rule &amp; Apply
+                    </Button>
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                      aria-label={`Dismiss suggestion ${s.merchantDisplay}`}
+                      onClick={() =>
+                        setDismissedSuggestionIds((prev) => [...prev, s.id])
+                      }
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
       )}
 
       {/* Rules Table Card */}

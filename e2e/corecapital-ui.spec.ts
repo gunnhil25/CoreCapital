@@ -380,4 +380,59 @@ test.describe.serial("CoreCapital End-to-End UI Flows", () => {
       }
     }
   });
+
+  test("6. Automated rule suggestions after CSV ingestion and learn-on-edit shortcut", async () => {
+    await page.goto("/ingest");
+    await expect(
+      page.getByRole("heading", { name: /Statement Ingestion & Parsing Engine/i })
+    ).toBeVisible();
+
+    // Load repeated sample CommBank statement containing Spotify & Amaysim
+    await page.getByRole("button", { name: /Load Sample CommBank Statement/i }).click();
+    await page.getByRole("button", { name: /Execute Bulk Ingestion/i }).click();
+
+    await expect(page.getByText(/Statement Ingestion Complete!/i)).toBeVisible();
+    await expect(
+      page.getByText(/Suggested Rules from Ingested Transactions \(/i)
+    ).toBeVisible();
+    await expect(page.getByText("Spotify", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Amaysim", { exact: true }).first()).toBeVisible();
+
+    // Bulk approve all high/medium ready suggestions
+    await page.getByRole("button", { name: /Approve All Ready \(/i }).click();
+    await expect(
+      page.getByText(/Approved \d+ rules? and tagged \d+ transactions? automatically!/i)
+    ).toBeVisible();
+    await assertNoHorizontalOverflow(page, "/ingest (suggestions)");
+
+    // Verify new rules are persisted in /rules
+    await page.goto("/rules");
+    await expect(page.getByRole("heading", { name: /Classification Rules Engine/i })).toBeVisible();
+    await expect(page.locator("table").getByText(/Spotify Auto-Tag/i)).toBeVisible();
+    await expect(page.locator("table").getByText(/Amaysim Auto-Tag/i)).toBeVisible();
+    await assertNoHorizontalOverflow(page, "/rules (after bulk approve)");
+
+    // Trigger Learn-on-Edit banner on /transactions when logging an unruled merchant
+    await page.goto("/transactions");
+    await page.getByRole("button", { name: /Log Transaction/i }).click();
+    const modal = page.locator("div.cc-animate-modal");
+    await expect(modal).toBeVisible();
+
+    await modal.locator('input[type="number"]').fill("85");
+    await modal.locator('input[placeholder*="Woolworths Adelaide"]').fill("Bunnings Mile End");
+    await selectOptionContaining(modal.locator("select").nth(1), "Household & Supplies");
+    await modal.getByRole("button", { name: /Commit to Ledger/i }).click();
+    await expect(modal).toBeHidden();
+
+    // Learn-on-Edit prompt should appear with one-click Create Rule & Apply
+    await expect(page.getByText(/Automate future entries:/i)).toBeVisible();
+    await expect(page.getByText(/Bunnings Warehouse/i).first()).toBeVisible();
+    await page.getByRole("button", { name: /Create Rule & Apply/i }).click();
+    await expect(page.getByText(/Automated rule "Bunnings Warehouse Auto-Tag" saved/i)).toBeVisible();
+    await assertNoHorizontalOverflow(page, "/transactions (learn-on-edit)");
+
+    // Confirm Bunnings rule appears on /rules
+    await page.goto("/rules");
+    await expect(page.locator("table").getByText(/Bunnings Warehouse Auto-Tag/i)).toBeVisible();
+  });
 });

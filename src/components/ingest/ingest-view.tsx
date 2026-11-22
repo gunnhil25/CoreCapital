@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   UploadCloud,
   FileText,
@@ -10,6 +11,9 @@ import {
   Sparkles,
   ArrowRight,
   ShieldCheck,
+  Wand2,
+  Plus,
+  X,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,7 +27,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { importBankStatementCsvAction } from "@/actions/csv-parser";
+import { importBankStatementCsvAction, ImportCsvResult } from "@/actions/csv-parser";
+import {
+  acceptBulkRuleSuggestionsAction,
+  acceptRuleSuggestionAction,
+  type RuleSuggestion,
+} from "@/actions/rules";
+import { sortAndFlattenCategories } from "@/lib/category-utils";
 import { formatDate } from "@/lib/utils";
 
 interface IngestViewProps {
@@ -39,15 +49,38 @@ interface IngestViewProps {
     status: string;
     importedAt: string;
   }>;
+  categories?: Array<{
+    id: string;
+    name: string;
+    type?: string;
+    color: string;
+    parentId?: string | null;
+    sortOrder?: number;
+  }>;
+  initialSuggestions?: RuleSuggestion[];
 }
 
-export function IngestView({ accounts, batches: initialBatches }: IngestViewProps) {
+export function IngestView({
+  accounts,
+  batches: initialBatches,
+  categories = [],
+  initialSuggestions = [],
+}: IngestViewProps) {
+  const router = useRouter();
+  const orderedCategories = useMemo(
+    () => sortAndFlattenCategories(categories),
+    [categories]
+  );
   const [batches, setBatches] = useState(initialBatches);
   const [selectedAccountId, setSelectedAccountId] = useState(accounts[0]?.id || "");
   const [bankFormat, setBankFormat] = useState("auto");
   const [file, setFile] = useState<File | null>(null);
   const [isPending, startTransition] = useTransition();
-  const [importResult, setImportResult] = useState<any>(null);
+  const [importResult, setImportResult] = useState<ImportCsvResult | null>(null);
+  const [suggestions, setSuggestions] = useState<RuleSuggestion[]>(initialSuggestions);
+  const [selectedCats, setSelectedCats] = useState<Record<string, string>>({});
+  const [dismissedIds, setDismissedIds] = useState<string[]>([]);
+  const [ruleFeedback, setRuleFeedback] = useState<string | null>(null);
 
   const sampleCsvData = `Date,Amount,Description,Balance
 10/10/2026,3850.00,DIRECT CREDIT DEFENCE PAYROLL,12450.00
@@ -55,7 +88,11 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
 08/10/2026,-18.50,EFTPOS MCDONALDS ADELAIDE,8445.70
 07/10/2026,-22.99,DIRECT DEBIT NETFLIX AUSTRALIA,8427.20
 06/10/2026,-95.40,BP CONNECT ADELAIDE FUEL,8331.80
-05/10/2026,-1250.00,BPAY TO ADF SUPER FHSS VOLUNTARY CONTRIB,7081.80`;
+05/10/2026,-1250.00,BPAY TO ADF SUPER FHSS VOLUNTARY CONTRIB,7081.80
+04/10/2026,-30.00,DIRECT DEBIT AMAYSIM MOBILE PTY LTD,7051.80
+02/10/2026,-13.99,VISA PURCHASE SPOTIFY AUSTRALIA,7037.81
+04/11/2026,-30.00,DIRECT DEBIT AMAYSIM MOBILE PTY LTD,7007.81
+02/11/2026,-13.99,VISA PURCHASE SPOTIFY AUSTRALIA,6993.82`;
 
   const handleLoadSampleStatement = () => {
     const blob = new Blob([sampleCsvData], { type: "text/csv" });
@@ -69,6 +106,7 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
     if (!file || !selectedAccountId) return;
 
     setImportResult(null);
+    setRuleFeedback(null);
 
     const formData = new FormData();
     formData.append("file", file);
@@ -93,7 +131,77 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
           },
           ...prev,
         ]);
+        if (res.suggestions && res.suggestions.length > 0) {
+          setSuggestions(res.suggestions);
+          setDismissedIds([]);
+        }
         setFile(null);
+        router.refresh();
+      }
+    });
+  };
+
+  const visibleSuggestions = suggestions.filter(
+    (s) => !dismissedIds.includes(s.id)
+  );
+  const getSelectedCatId = (s: RuleSuggestion) =>
+    selectedCats[s.id] !== undefined
+      ? selectedCats[s.id]
+      : s.suggestedCategoryId || "";
+  const readySuggestions = visibleSuggestions.filter((s) =>
+    Boolean(getSelectedCatId(s))
+  );
+
+  const handleApproveSuggestion = (s: RuleSuggestion) => {
+    const catId = getSelectedCatId(s);
+    if (!catId) return;
+    setRuleFeedback(null);
+
+    startTransition(async () => {
+      const res = await acceptRuleSuggestionAction({
+        name: s.suggestedRuleName,
+        matchValue: s.matchValue,
+        targetCategoryId: catId,
+        field: s.field,
+        priority: s.suggestedPriority,
+        applyToExisting: true,
+      });
+      if (res.success) {
+        if (res.suggestions) {
+          setSuggestions(res.suggestions);
+        } else {
+          setDismissedIds((prev) => [...prev, s.id]);
+        }
+        setRuleFeedback(
+          `Created rule "${s.suggestedRuleName}" and auto-tagged ${res.matchedCount ?? 0} matching transactions.`
+        );
+        router.refresh();
+      }
+    });
+  };
+
+  const handleApproveAllReady = () => {
+    if (readySuggestions.length === 0) return;
+    setRuleFeedback(null);
+
+    startTransition(async () => {
+      const res = await acceptBulkRuleSuggestionsAction(
+        readySuggestions.map((s) => ({
+          name: s.suggestedRuleName,
+          matchValue: s.matchValue,
+          targetCategoryId: getSelectedCatId(s),
+          field: s.field,
+          priority: s.suggestedPriority,
+        }))
+      );
+      if (res.success) {
+        if (res.suggestions) {
+          setSuggestions(res.suggestions);
+        }
+        setRuleFeedback(
+          `Approved ${res.createdCount ?? 0} rules and tagged ${res.matchedCount ?? 0} transactions automatically!`
+        );
+        router.refresh();
       }
     });
   };
@@ -128,9 +236,10 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
                 <div className="space-y-1.5">
                   <Label>Destination Account</Label>
                   <select
+                    aria-label="Destination Account"
                     value={selectedAccountId}
                     onChange={(e) => setSelectedAccountId(e.target.value)}
-                    className="w-full h-9 rounded-lg border border-input bg-transparent px-3 text-xs"
+                    className="w-full h-9 rounded-lg border border-input bg-background text-foreground px-3 text-xs"
                   >
                     {accounts.map((a) => (
                       <option key={a.id} value={a.id}>
@@ -143,9 +252,10 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
                 <div className="space-y-1.5">
                   <Label>Bank CSV Format</Label>
                   <select
+                    aria-label="Bank CSV Format"
                     value={bankFormat}
                     onChange={(e) => setBankFormat(e.target.value)}
-                    className="w-full h-9 rounded-lg border border-input bg-transparent px-3 text-xs"
+                    className="w-full h-9 rounded-lg border border-input bg-background text-foreground px-3 text-xs"
                   >
                     <option value="auto">Auto-Detect Headers</option>
                     <option value="commbank">Commonwealth Bank (CBA)</option>
@@ -278,11 +388,11 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
                       Statement Ingestion Complete!
                     </span>{" "}
                     Successfully imported <strong>{importResult.importedCount}</strong> rows.{" "}
-                    {importResult.duplicateCount > 0 && (
+                    {importResult.duplicateCount && importResult.duplicateCount > 0 ? (
                       <span className="text-amber-600 dark:text-amber-400">
                         Skipped {importResult.duplicateCount} duplicate records.
                       </span>
-                    )}
+                    ) : null}
                   </div>
                 ) : (
                   <span className="text-destructive font-medium">
@@ -291,6 +401,140 @@ export function IngestView({ accounts, batches: initialBatches }: IngestViewProp
                 )}
               </div>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Rule Creation Feedback Banner */}
+      {ruleFeedback && (
+        <div className="p-3.5 rounded-lg border bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-xs sm:text-sm flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            <span>{ruleFeedback}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRuleFeedback(null)}
+            className="text-xs opacity-70 hover:opacity-100"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Smart Rule Suggestions Panel */}
+      {visibleSuggestions.length > 0 && (
+        <Card className="border-primary/30 bg-gradient-to-br from-primary/5 via-card to-card">
+          <CardHeader className="p-4 pb-3 border-b flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Wand2 className="h-4 w-4 text-primary" />
+                Suggested Rules from Ingested Transactions ({visibleSuggestions.length})
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Automatically detected repeated or recognized merchants without active rules — approve to automate future imports
+              </CardDescription>
+            </div>
+            {readySuggestions.length > 0 && (
+              <Button
+                type="button"
+                size="sm"
+                disabled={isPending}
+                onClick={handleApproveAllReady}
+                className="gap-1.5 shrink-0"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Approve All Ready ({readySuggestions.length})
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="p-0 divide-y">
+            {visibleSuggestions.map((s) => {
+              const selectedCatId = getSelectedCatId(s);
+              return (
+                <div
+                  key={s.id}
+                  className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 hover:bg-muted/20 transition-colors"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm">{s.merchantDisplay}</span>
+                      <code className="text-[11px] font-mono bg-muted px-1.5 py-0.5 rounded text-primary">
+                        contains &ldquo;{s.matchValue}&rdquo;
+                      </code>
+                      <Badge variant="outline" className="text-[10px] font-mono py-0">
+                        {s.occurrenceCount} {s.occurrenceCount === 1 ? "tx" : "txs"}
+                      </Badge>
+                      {s.isRecurring && (
+                        <Badge variant="info" className="text-[9px] font-mono py-0">
+                          Recurring
+                        </Badge>
+                      )}
+                      <Badge
+                        variant={
+                          s.confidence === "high"
+                            ? "success"
+                            : s.confidence === "medium"
+                            ? "secondary"
+                            : "warning"
+                        }
+                        className="text-[9px] font-mono py-0"
+                      >
+                        {s.confidence === "high"
+                          ? "High Confidence"
+                          : s.confidence === "medium"
+                          ? "Suggested"
+                          : "Choose Category"}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{s.reason}</p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <select
+                      aria-label={`Category for ${s.merchantDisplay}`}
+                      value={selectedCatId}
+                      onChange={(e) =>
+                        setSelectedCats((prev) => ({
+                          ...prev,
+                          [s.id]: e.target.value,
+                        }))
+                      }
+                      className="h-8 min-w-[190px] rounded-lg border border-input bg-background text-foreground px-2.5 text-xs"
+                    >
+                      <option value="">Select category...</option>
+                      {orderedCategories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={isPending || !selectedCatId}
+                      onClick={() => handleApproveSuggestion(s)}
+                      className="h-8 text-xs gap-1"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add &amp; Tag
+                    </Button>
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                      aria-label={`Dismiss ${s.merchantDisplay}`}
+                      onClick={() => setDismissedIds((prev) => [...prev, s.id])}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
       )}
