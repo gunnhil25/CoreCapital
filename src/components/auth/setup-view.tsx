@@ -217,7 +217,7 @@ export function SetupView() {
                     </Badge>
                   </div>
                   <p className="text-[11px] text-muted-foreground leading-relaxed">
-                    Seeds sample CommBank, Macquarie, ADF Super, budgets, subscriptions, and 2029 FHSS/DHOAS scenarios.
+                    Seeds sample CommBank, Macquarie, ADF Super, budgets, subscriptions, and sample property/FHSS/DHOAS scenarios.
                   </p>
                 </button>
               </div>

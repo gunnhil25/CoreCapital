@@ -21,8 +21,10 @@ import { defaultAccounts, defaultCategories, defaultRules } from "./initial-data
 import { computeDeduplicationHash } from "./csv-engine";
 import {
   calculateAnnualizedSubscriptionCost,
-  calculateSouthAustraliaStampDuty,
-  calculateVictoriaStampDuty,
+  calculateStampDuty,
+  DhoasConfigMode,
+  isAustralianStateCode,
+  PropertyLocationCode,
 } from "./australian-finance";
 import { getSessionPayload, hashPassword } from "./auth";
 
@@ -172,12 +174,31 @@ export interface FhssContributionRecord {
 
 export interface PropertyGoalConfig {
   userId?: string;
+  goalName: string;
+  targetDate: string; // YYYY-MM-DD
   targetYear: number;
-  targetCity: "Adelaide" | "Melbourne";
+  locationCode: PropertyLocationCode;
+  targetCity: string;
+  customLocationName?: string | null;
+  isFirstHomeBuyer: boolean;
   targetPrice: number;
   depositPct: number;
+  customStampDuty: number | null;
+  conveyancingFees: number;
+  estimatedLmi: number;
+  useLiveLiquidSavings: boolean;
+  currentSavingsAllocated: number;
   monthlySavingsPace: number;
-  enlistmentDate: string;
+  useFhss: boolean;
+  fhssMarginalTaxRatePct: number;
+  useDhoas: boolean;
+  dhoasMode: DhoasConfigMode;
+  dhoasEnlistmentDate: string;
+  dhoasServiceType: "permanent" | "reserve";
+  dhoasMonthlySubsidy: number | null;
+  dhoasLoanCap: number | null;
+  dhoasLumpSumAmount: number;
+  notes?: string | null;
 }
 
 export interface ImportBatchItem {
@@ -585,12 +606,31 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
 
   const seededGoal: PropertyGoalConfig = {
     userId,
+    goalName: "First Home Deposit Goal",
+    targetDate: "2029-07-01",
     targetYear: 2029,
+    locationCode: "SA",
     targetCity: "Adelaide",
+    customLocationName: null,
+    isFirstHomeBuyer: true,
     targetPrice: 850000,
     depositPct: 20,
+    customStampDuty: null,
+    conveyancingFees: 3850,
+    estimatedLmi: 0,
+    useLiveLiquidSavings: true,
+    currentSavingsAllocated: 0,
     monthlySavingsPace: 2100,
-    enlistmentDate: "2021-03-01",
+    useFhss: true,
+    fhssMarginalTaxRatePct: 32.5,
+    useDhoas: true,
+    dhoasMode: "auto",
+    dhoasEnlistmentDate: "2021-03-01",
+    dhoasServiceType: "permanent",
+    dhoasMonthlySubsidy: null,
+    dhoasLoanCap: null,
+    dhoasLumpSumAmount: 0,
+    notes: null,
   };
 
   const seededFhss: FhssContributionRecord[] = [
@@ -675,21 +715,10 @@ function createCleanWorkspacePayload(userId: string) {
     matchCount: 0,
   }));
 
-  const seededGoal: PropertyGoalConfig = {
-    userId,
-    targetYear: 2029,
-    targetCity: "Adelaide",
-    targetPrice: 850000,
-    depositPct: 20,
-    monthlySavingsPace: 0,
-    enlistmentDate: "2021-03-01",
-  };
-
   return {
     seededCategories,
     seededAccounts,
     seededRules,
-    seededGoal,
   };
 }
 
@@ -723,7 +752,6 @@ function seedInMemoryWorkspace(
     inMemoryCategories.push(...clean.seededCategories);
     inMemoryAccounts.push(...clean.seededAccounts);
     inMemoryRules.push(...clean.seededRules);
-    inMemoryGoalConfigs.set(userId, clean.seededGoal);
   }
 }
 
@@ -770,6 +798,26 @@ async function ensureMigrated(): Promise<void> {
       await migrate(db, {
         migrationsFolder: path.join(process.cwd(), "src/db/migrations"),
       });
+    } else {
+      // Legacy db:push databases without __drizzle_migrations table: apply idempotent schema extensions
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "goal_name" varchar(150) DEFAULT 'Mortgage Deposit Goal' NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "target_date" date DEFAULT '2029-07-01' NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "location_code" varchar(20) DEFAULT 'SA' NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "custom_location_name" varchar(150)`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "is_first_home_buyer" boolean DEFAULT true NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "custom_stamp_duty" numeric(12, 2)`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "use_live_liquid_savings" boolean DEFAULT true NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "use_fhss" boolean DEFAULT false NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "fhss_marginal_tax_rate_pct" numeric(5, 2) DEFAULT '32.50' NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "use_dhoas" boolean DEFAULT false NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_mode" varchar(20) DEFAULT 'auto' NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_enlistment_date" date`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_service_type" varchar(20) DEFAULT 'permanent' NOT NULL`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_monthly_subsidy" numeric(12, 2)`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_loan_cap" numeric(12, 2)`);
+      await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_lump_sum_amount" numeric(12, 2) DEFAULT '0.00' NOT NULL`);
+      await db.execute(sql`UPDATE "property_goals" SET "location_code" = 'VIC' WHERE "target_city" = 'Melbourne' AND "location_code" = 'SA'`);
+      await db.execute(sql`UPDATE "property_goals" SET "target_date" = make_date("target_year", 7, 1) WHERE "target_year" <> 2029`);
     }
     hasMigratedDb = true;
   })().finally(() => {
@@ -933,12 +981,22 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
       );
     }
 
-    const initialStampDuty = calculateSouthAustraliaStampDuty(demo.seededGoal.targetPrice, true);
+    const initialStampDuty = calculateStampDuty(
+      demo.seededGoal.locationCode,
+      demo.seededGoal.targetPrice,
+      demo.seededGoal.isFirstHomeBuyer,
+      demo.seededGoal.customStampDuty
+    );
     await db.insert(propertyGoals).values({
       id: crypto.randomUUID(),
       userId: dbUserId,
+      goalName: demo.seededGoal.goalName,
+      targetDate: demo.seededGoal.targetDate,
       targetYear: demo.seededGoal.targetYear,
+      locationCode: demo.seededGoal.locationCode,
       targetCity: demo.seededGoal.targetCity,
+      customLocationName: demo.seededGoal.customLocationName ?? null,
+      isFirstHomeBuyer: demo.seededGoal.isFirstHomeBuyer,
       targetPropertyPrice: demo.seededGoal.targetPrice.toFixed(2),
       targetDepositPct: demo.seededGoal.depositPct.toFixed(2),
       targetDepositAmount: (
@@ -946,7 +1004,31 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
         100
       ).toFixed(2),
       estimatedStampDuty: initialStampDuty.toFixed(2),
+      customStampDuty:
+        demo.seededGoal.customStampDuty !== null
+          ? demo.seededGoal.customStampDuty.toFixed(2)
+          : null,
+      estimatedLmi: demo.seededGoal.estimatedLmi.toFixed(2),
+      estimatedConveyancingAndFees: demo.seededGoal.conveyancingFees.toFixed(2),
+      useLiveLiquidSavings: demo.seededGoal.useLiveLiquidSavings,
+      currentSavingsAllocated: demo.seededGoal.currentSavingsAllocated.toFixed(2),
       monthlySavingsContribution: demo.seededGoal.monthlySavingsPace.toFixed(2),
+      useFhss: demo.seededGoal.useFhss,
+      fhssMarginalTaxRatePct: demo.seededGoal.fhssMarginalTaxRatePct.toFixed(2),
+      useDhoas: demo.seededGoal.useDhoas,
+      dhoasMode: demo.seededGoal.dhoasMode,
+      dhoasEnlistmentDate: demo.seededGoal.dhoasEnlistmentDate,
+      dhoasServiceType: demo.seededGoal.dhoasServiceType,
+      dhoasMonthlySubsidy:
+        demo.seededGoal.dhoasMonthlySubsidy !== null
+          ? demo.seededGoal.dhoasMonthlySubsidy.toFixed(2)
+          : null,
+      dhoasLoanCap:
+        demo.seededGoal.dhoasLoanCap !== null
+          ? demo.seededGoal.dhoasLoanCap.toFixed(2)
+          : null,
+      dhoasLumpSumAmount: demo.seededGoal.dhoasLumpSumAmount.toFixed(2),
+      notes: demo.seededGoal.notes ?? null,
     });
 
     if (demo.seededFhss.length > 0) {
@@ -1009,22 +1091,6 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
         matchCount: r.matchCount,
       }))
     );
-
-    const initialStampDuty = calculateSouthAustraliaStampDuty(clean.seededGoal.targetPrice, true);
-    await db.insert(propertyGoals).values({
-      id: crypto.randomUUID(),
-      userId: dbUserId,
-      targetYear: clean.seededGoal.targetYear,
-      targetCity: clean.seededGoal.targetCity,
-      targetPropertyPrice: clean.seededGoal.targetPrice.toFixed(2),
-      targetDepositPct: clean.seededGoal.depositPct.toFixed(2),
-      targetDepositAmount: (
-        (clean.seededGoal.targetPrice * clean.seededGoal.depositPct) /
-        100
-      ).toFixed(2),
-      estimatedStampDuty: initialStampDuty.toFixed(2),
-      monthlySavingsContribution: "0.00",
-    });
   }
 }
 
@@ -2093,92 +2159,163 @@ export const store = {
     }
   },
 
-  getPropertyGoalConfig: async (explicitUserId?: string): Promise<PropertyGoalConfig> => {
+  getPropertyGoalConfig: async (explicitUserId?: string): Promise<PropertyGoalConfig | null> => {
     const userId = await store.resolveActiveUserId(explicitUserId);
-    if (!userId) {
-      return {
-        targetYear: 2029,
-        targetCity: "Adelaide",
-        targetPrice: 850000,
-        depositPct: 20,
-        monthlySavingsPace: 0,
-        enlistmentDate: "2021-03-01",
-      };
-    }
+    if (!userId) return null;
+
     if (await isDbReady()) {
       const rows = await db
         .select()
         .from(propertyGoals)
         .where(eq(propertyGoals.userId, toUuid(userId)))
         .limit(1);
-      if (rows.length > 0) {
-        const g = rows[0];
-        return {
-          userId,
-          targetYear: g.targetYear,
-          targetCity: (g.targetCity as "Adelaide" | "Melbourne") || "Adelaide",
-          targetPrice: parseFloat(g.targetPropertyPrice),
-          depositPct: parseFloat(g.targetDepositPct),
-          monthlySavingsPace: parseFloat(g.monthlySavingsContribution),
-          enlistmentDate: "2021-03-01",
-        };
-      }
+      if (rows.length === 0) return null;
+
+      const g = rows[0];
+      const rawLoc = g.locationCode || "";
+      const locationCode: PropertyLocationCode =
+        rawLoc === "CUSTOM"
+          ? "CUSTOM"
+          : isAustralianStateCode(rawLoc)
+          ? rawLoc
+          : g.targetCity === "Melbourne"
+          ? "VIC"
+          : "SA";
+      const targetDate = g.targetDate || `${g.targetYear || 2029}-07-01`;
+      const targetYear =
+        g.targetYear || parseInt(targetDate.slice(0, 4), 10) || new Date().getFullYear() + 3;
+      const validDhoasModes: DhoasConfigMode[] = ["auto", "tier1", "tier2", "tier3", "custom"];
+      const dhoasMode: DhoasConfigMode = validDhoasModes.includes(g.dhoasMode as DhoasConfigMode)
+        ? (g.dhoasMode as DhoasConfigMode)
+        : "auto";
+
+      return {
+        userId,
+        goalName: g.goalName || "Mortgage Deposit Goal",
+        targetDate,
+        targetYear,
+        locationCode,
+        targetCity: g.targetCity || (locationCode === "CUSTOM" ? "Custom Location" : "Adelaide"),
+        customLocationName: g.customLocationName ?? null,
+        isFirstHomeBuyer: g.isFirstHomeBuyer ?? true,
+        targetPrice: parseFloat(g.targetPropertyPrice) || 0,
+        depositPct: parseFloat(g.targetDepositPct) || 0,
+        customStampDuty: g.customStampDuty !== null ? parseFloat(g.customStampDuty) : null,
+        conveyancingFees: parseFloat(g.estimatedConveyancingAndFees) || 0,
+        estimatedLmi: parseFloat(g.estimatedLmi) || 0,
+        useLiveLiquidSavings: g.useLiveLiquidSavings ?? true,
+        currentSavingsAllocated: parseFloat(g.currentSavingsAllocated) || 0,
+        monthlySavingsPace: parseFloat(g.monthlySavingsContribution) || 0,
+        useFhss: g.useFhss ?? false,
+        fhssMarginalTaxRatePct: parseFloat(g.fhssMarginalTaxRatePct) || 32.5,
+        useDhoas: g.useDhoas ?? false,
+        dhoasMode,
+        dhoasEnlistmentDate: g.dhoasEnlistmentDate || "2021-03-01",
+        dhoasServiceType: g.dhoasServiceType === "reserve" ? "reserve" : "permanent",
+        dhoasMonthlySubsidy:
+          g.dhoasMonthlySubsidy !== null ? parseFloat(g.dhoasMonthlySubsidy) : null,
+        dhoasLoanCap: g.dhoasLoanCap !== null ? parseFloat(g.dhoasLoanCap) : null,
+        dhoasLumpSumAmount: parseFloat(g.dhoasLumpSumAmount) || 0,
+        notes: g.notes ?? null,
+      };
     }
 
     const existing = inMemoryGoalConfigs.get(userId);
-    if (existing) return { ...existing };
-
-    return {
-      userId,
-      targetYear: 2029,
-      targetCity: "Adelaide",
-      targetPrice: 850000,
-      depositPct: 20,
-      monthlySavingsPace: 0,
-      enlistmentDate: "2021-03-01",
-    };
+    return existing ? { ...existing } : null;
   },
 
-  updatePropertyGoalConfig: async (
-    input: {
-      targetCity: "Adelaide" | "Melbourne";
-      targetPrice: number;
-      depositPct: number;
-    },
+  savePropertyGoalConfig: async (
+    input: Omit<PropertyGoalConfig, "userId">,
     explicitUserId?: string
-  ): Promise<void> => {
+  ): Promise<PropertyGoalConfig> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const saved: PropertyGoalConfig = {
+      ...input,
+      userId,
+    };
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const stampDuty = calculateStampDuty(
+        input.locationCode,
+        input.targetPrice,
+        input.isFirstHomeBuyer,
+        input.customStampDuty
+      );
+      const depositAmount = (input.targetPrice * input.depositPct) / 100;
+
+      const values = {
+        goalName: input.goalName,
+        targetDate: input.targetDate,
+        targetYear: input.targetYear,
+        locationCode: input.locationCode,
+        targetCity: input.targetCity,
+        customLocationName: input.customLocationName ?? null,
+        isFirstHomeBuyer: input.isFirstHomeBuyer,
+        targetPropertyPrice: input.targetPrice.toFixed(2),
+        targetDepositPct: input.depositPct.toFixed(2),
+        targetDepositAmount: depositAmount.toFixed(2),
+        estimatedStampDuty: stampDuty.toFixed(2),
+        customStampDuty:
+          input.customStampDuty !== null ? input.customStampDuty.toFixed(2) : null,
+        estimatedLmi: input.estimatedLmi.toFixed(2),
+        estimatedConveyancingAndFees: input.conveyancingFees.toFixed(2),
+        useLiveLiquidSavings: input.useLiveLiquidSavings,
+        currentSavingsAllocated: input.currentSavingsAllocated.toFixed(2),
+        monthlySavingsContribution: input.monthlySavingsPace.toFixed(2),
+        useFhss: input.useFhss,
+        fhssMarginalTaxRatePct: input.fhssMarginalTaxRatePct.toFixed(2),
+        useDhoas: input.useDhoas,
+        dhoasMode: input.dhoasMode,
+        dhoasEnlistmentDate: input.dhoasEnlistmentDate || null,
+        dhoasServiceType: input.dhoasServiceType,
+        dhoasMonthlySubsidy:
+          input.dhoasMonthlySubsidy !== null ? input.dhoasMonthlySubsidy.toFixed(2) : null,
+        dhoasLoanCap: input.dhoasLoanCap !== null ? input.dhoasLoanCap.toFixed(2) : null,
+        dhoasLumpSumAmount: input.dhoasLumpSumAmount.toFixed(2),
+        notes: input.notes ?? null,
+        updatedAt: new Date(),
+      };
+
+      const existingRows = await db
+        .select({ id: propertyGoals.id })
+        .from(propertyGoals)
+        .where(eq(propertyGoals.userId, dbUserId))
+        .limit(1);
+
+      if (existingRows.length > 0) {
+        await db
+          .update(propertyGoals)
+          .set(values)
+          .where(eq(propertyGoals.userId, dbUserId));
+      } else {
+        await db.insert(propertyGoals).values({
+          id: crypto.randomUUID(),
+          userId: dbUserId,
+          ...values,
+        });
+      }
+      return saved;
+    }
+
+    inMemoryGoalConfigs.set(userId, saved);
+    return { ...saved };
+  },
+
+  deletePropertyGoalConfig: async (explicitUserId?: string): Promise<void> => {
     const userId = await store.resolveActiveUserId(explicitUserId);
     if (!userId) {
       throw new Error("Authentication required.");
     }
     if (await isDbReady()) {
-      const stampDuty =
-        input.targetCity === "Adelaide"
-          ? calculateSouthAustraliaStampDuty(input.targetPrice, true)
-          : calculateVictoriaStampDuty(input.targetPrice, true);
-      const depositAmount = (input.targetPrice * input.depositPct) / 100;
-
-      await db
-        .update(propertyGoals)
-        .set({
-          targetCity: input.targetCity,
-          targetPropertyPrice: input.targetPrice.toFixed(2),
-          targetDepositPct: input.depositPct.toFixed(2),
-          targetDepositAmount: depositAmount.toFixed(2),
-          estimatedStampDuty: stampDuty.toFixed(2),
-          updatedAt: new Date(),
-        })
-        .where(eq(propertyGoals.userId, toUuid(userId)));
+      await db.delete(propertyGoals).where(eq(propertyGoals.userId, toUuid(userId)));
       return;
     }
-
-    const current = await store.getPropertyGoalConfig(userId);
-    inMemoryGoalConfigs.set(userId, {
-      ...current,
-      targetCity: input.targetCity,
-      targetPrice: input.targetPrice,
-      depositPct: input.depositPct,
-    });
+    inMemoryGoalConfigs.delete(userId);
   },
 
   getFhssContributions: async (
@@ -2249,5 +2386,30 @@ export const store = {
     }
 
     return newRecord;
+  },
+
+  deleteFhssContribution: async (id: string, explicitUserId?: string): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+    if (await isDbReady()) {
+      await db
+        .delete(fhssContributions)
+        .where(
+          and(
+            eq(fhssContributions.id, toUuid(id)),
+            eq(fhssContributions.userId, toUuid(userId))
+          )
+        );
+      return;
+    }
+
+    const idx = inMemoryFhssContributions.findIndex(
+      (c) => c.id === id && c.userId === userId
+    );
+    if (idx !== -1) {
+      inMemoryFhssContributions.splice(idx, 1);
+    }
   },
 };

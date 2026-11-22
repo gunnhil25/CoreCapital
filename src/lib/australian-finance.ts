@@ -1,7 +1,7 @@
 /**
  * Specialized Australian Financial & Housing Scheme Calculation Engine
  * Encompasses FHSS (First Home Super Saver), DHOAS (Defence Home Ownership Assistance Scheme),
- * State Stamp Duty (SA & VIC), and Subscription Annualization.
+ * State Stamp Duty (All Australian States & Territories + Custom), and Subscription Annualization.
  */
 
 // ============================================================================
@@ -136,6 +136,8 @@ export function calculateFhssRelease(
 // ============================================================================
 // 2. DHOAS (DEFENCE HOME OWNERSHIP ASSISTANCE SCHEME)
 // ============================================================================
+export type DhoasConfigMode = "auto" | "tier1" | "tier2" | "tier3" | "custom";
+
 export interface DhoasTierInfo {
   tier: number;
   name: string;
@@ -180,61 +182,291 @@ export const DHOAS_TIERS: Record<number, DhoasTierInfo> = {
   },
 };
 
-/**
- * Calculates current and projected 2029 DHOAS entitlement tiers
- */
-export function calculateDhoasEntitlement(
-  enlistmentDate: string,
-  serviceType: "permanent" | "reserve" = "permanent"
-): {
+export interface DhoasCalculationOptions {
+  mode?: DhoasConfigMode;
+  customMonthlySubsidy?: number | null;
+  customLoanCap?: number | null;
+  lumpSumAmount?: number;
+}
+
+export interface DhoasCalculationResult {
   currentServiceYears: number;
   currentTier: DhoasTierInfo;
+  targetYear: number;
+  projectedYears: number;
+  projectedTier: DhoasTierInfo;
+  effectiveMonthlySubsidy: number;
+  effectiveLoanCap: number;
+  annualSubsidyValue: number;
+  lumpSumAmount: number;
+  mode: DhoasConfigMode;
+  serviceType: "permanent" | "reserve";
+  // Backwards-compatible aliases
   projected2029Years: number;
   projected2029Tier: DhoasTierInfo;
   annualSubsidyValue2029: number;
-} {
-  const start = new Date(enlistmentDate);
+}
+
+/**
+ * Calculates current and projected DHOAS entitlement tiers for a configurable target date
+ * and optional manual tier/subsidy/loan-cap/lump-sum overrides.
+ */
+export function calculateDhoasEntitlement(
+  enlistmentDate: string,
+  serviceType: "permanent" | "reserve" = "permanent",
+  targetDate: string = "2029-07-01",
+  options?: DhoasCalculationOptions
+): DhoasCalculationResult {
   const now = new Date();
-  const target2029 = new Date("2029-07-01");
+  const parsedStart = new Date(enlistmentDate);
+  const start = isNaN(parsedStart.getTime()) ? now : parsedStart;
+
+  const parsedTarget = new Date(targetDate);
+  const target = isNaN(parsedTarget.getTime()) ? new Date("2029-07-01") : parsedTarget;
 
   const diffCurrentMs = now.getTime() - start.getTime();
   const currentServiceYears = Math.max(0, diffCurrentMs / (1000 * 60 * 60 * 24 * 365.25));
 
-  const diff2029Ms = target2029.getTime() - start.getTime();
-  const projected2029Years = Math.max(0, diff2029Ms / (1000 * 60 * 60 * 24 * 365.25));
+  const diffTargetMs = target.getTime() - start.getTime();
+  const projectedYears = Math.max(0, diffTargetMs / (1000 * 60 * 60 * 24 * 365.25));
 
-  // Determine current tier
+  // Determine current tier from service accrual
   let currentTierNumber = 0;
   if (currentServiceYears >= 12) currentTierNumber = 3;
   else if (currentServiceYears >= 8) currentTierNumber = 2;
   else if (currentServiceYears >= 4) currentTierNumber = 1;
 
-  // Determine 2029 tier
-  let projectedTierNumber = 0;
-  if (projected2029Years >= 12) projectedTierNumber = 3;
-  else if (projected2029Years >= 8) projectedTierNumber = 2;
-  else if (projected2029Years >= 4) projectedTierNumber = 1;
+  const mode: DhoasConfigMode = options?.mode ?? "auto";
+  let projectedTier: DhoasTierInfo;
 
+  if (mode === "tier1") {
+    projectedTier = DHOAS_TIERS[1];
+  } else if (mode === "tier2") {
+    projectedTier = DHOAS_TIERS[2];
+  } else if (mode === "tier3") {
+    projectedTier = DHOAS_TIERS[3];
+  } else if (mode === "custom") {
+    projectedTier = {
+      tier: 0,
+      name: "Custom DHOAS Amount",
+      minYears: 0,
+      maxYears: 99,
+      subsidisedLoanCap: Math.max(0, options?.customLoanCap ?? 0),
+      estimatedMonthlySubsidy: Math.max(0, options?.customMonthlySubsidy ?? 0),
+    };
+  } else {
+    let projectedTierNumber = 0;
+    if (projectedYears >= 12) projectedTierNumber = 3;
+    else if (projectedYears >= 8) projectedTierNumber = 2;
+    else if (projectedYears >= 4) projectedTierNumber = 1;
+    projectedTier = DHOAS_TIERS[projectedTierNumber];
+  }
+
+  const effectiveMonthlySubsidy =
+    options?.customMonthlySubsidy != null && Number.isFinite(options.customMonthlySubsidy)
+      ? Math.max(0, options.customMonthlySubsidy)
+      : projectedTier.estimatedMonthlySubsidy;
+
+  const effectiveLoanCap =
+    options?.customLoanCap != null && Number.isFinite(options.customLoanCap)
+      ? Math.max(0, options.customLoanCap)
+      : projectedTier.subsidisedLoanCap;
+
+  const annualSubsidyValue = Math.round(effectiveMonthlySubsidy * 12);
+  const lumpSumAmount = Math.max(0, options?.lumpSumAmount ?? 0);
+  const roundedProjectedYears = parseFloat(projectedYears.toFixed(1));
   const currentTier = DHOAS_TIERS[currentTierNumber];
-  const projected2029Tier = DHOAS_TIERS[projectedTierNumber];
 
   return {
     currentServiceYears: parseFloat(currentServiceYears.toFixed(1)),
     currentTier,
-    projected2029Years: parseFloat(projected2029Years.toFixed(1)),
-    projected2029Tier,
-    annualSubsidyValue2029: projected2029Tier.estimatedMonthlySubsidy * 12,
+    targetYear: target.getFullYear(),
+    projectedYears: roundedProjectedYears,
+    projectedTier,
+    effectiveMonthlySubsidy,
+    effectiveLoanCap,
+    annualSubsidyValue,
+    lumpSumAmount,
+    mode,
+    serviceType,
+    projected2029Years: roundedProjectedYears,
+    projected2029Tier: projectedTier,
+    annualSubsidyValue2029: annualSubsidyValue,
   };
 }
 
 // ============================================================================
-// 3. STAMP DUTY CALCULATORS (ADELAIDE / SA & MELBOURNE / VIC)
+// 3. AUSTRALIAN STATE/TERRITORY & CUSTOM LOCATION STAMP DUTY CALCULATORS
 // ============================================================================
+export type AustralianStateCode = "NSW" | "VIC" | "QLD" | "SA" | "WA" | "TAS" | "ACT" | "NT";
+export type PropertyLocationCode = AustralianStateCode | "CUSTOM";
+
+export interface AustralianStateInfo {
+  code: AustralianStateCode;
+  name: string;
+  defaultCity: string;
+  defaultPrice: number;
+  fhbNote: string;
+}
+
+export const AUSTRALIAN_STATES: AustralianStateInfo[] = [
+  {
+    code: "NSW",
+    name: "New South Wales",
+    defaultCity: "Sydney",
+    defaultPrice: 1100000,
+    fhbNote: "FHB exempt up to $800k, concessional sliding scale to $1M",
+  },
+  {
+    code: "VIC",
+    name: "Victoria",
+    defaultCity: "Melbourne",
+    defaultPrice: 950000,
+    fhbNote: "FHB exempt up to $600k, concessional sliding scale to $750k",
+  },
+  {
+    code: "QLD",
+    name: "Queensland",
+    defaultCity: "Brisbane",
+    defaultPrice: 880000,
+    fhbNote: "FHB exempt up to $700k, concessional sliding scale to $800k",
+  },
+  {
+    code: "SA",
+    name: "South Australia",
+    defaultCity: "Adelaide",
+    defaultPrice: 850000,
+    fhbNote: "Standard residential scale modeled; eligible new FHB homes may qualify for full relief",
+  },
+  {
+    code: "WA",
+    name: "Western Australia",
+    defaultCity: "Perth",
+    defaultPrice: 780000,
+    fhbNote: "FHB exempt up to $450k, concessional sliding scale to $600k",
+  },
+  {
+    code: "TAS",
+    name: "Tasmania",
+    defaultCity: "Hobart",
+    defaultPrice: 720000,
+    fhbNote: "FHB exempt on eligible established homes up to $750k",
+  },
+  {
+    code: "ACT",
+    name: "Australian Capital Territory",
+    defaultCity: "Canberra",
+    defaultPrice: 920000,
+    fhbNote: "Home Buyer Concession Scheme exempt up to $1M (income-tested)",
+  },
+  {
+    code: "NT",
+    name: "Northern Territory",
+    defaultCity: "Darwin",
+    defaultPrice: 600000,
+    fhbNote: "NT residential conveyance scale applied",
+  },
+];
+
+export function isAustralianStateCode(value: string): value is AustralianStateCode {
+  return AUSTRALIAN_STATES.some((s) => s.code === value);
+}
+
+export function getAustralianStateInfo(code: AustralianStateCode): AustralianStateInfo {
+  return AUSTRALIAN_STATES.find((s) => s.code === code) || AUSTRALIAN_STATES[3];
+}
+
+export function getLocationDisplayLabel(
+  locationCode: PropertyLocationCode,
+  targetCity?: string | null
+): string {
+  const trimmed = targetCity?.trim() || "";
+  if (locationCode === "CUSTOM") {
+    return trimmed || "Custom Location";
+  }
+  const state = getAustralianStateInfo(locationCode);
+  const city = trimmed || state.defaultCity;
+  if (
+    city.toUpperCase().endsWith(`, ${locationCode}`) ||
+    city.toUpperCase().endsWith(`(${locationCode})`)
+  ) {
+    return city;
+  }
+  return `${city}, ${locationCode}`;
+}
+
+/**
+ * New South Wales (Sydney) Stamp Duty calculation
+ */
+export function calculateNewSouthWalesStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
+  if (propertyPrice <= 0) return 0;
+
+  let standardDuty = 0;
+  if (propertyPrice <= 17000) {
+    standardDuty = Math.round(propertyPrice * 0.0125);
+  } else if (propertyPrice <= 36000) {
+    standardDuty = Math.round(212 + (propertyPrice - 17000) * 0.015);
+  } else if (propertyPrice <= 97000) {
+    standardDuty = Math.round(497 + (propertyPrice - 36000) * 0.0175);
+  } else if (propertyPrice <= 364000) {
+    standardDuty = Math.round(1564 + (propertyPrice - 97000) * 0.035);
+  } else if (propertyPrice <= 1212000) {
+    standardDuty = Math.round(10909 + (propertyPrice - 364000) * 0.045);
+  } else {
+    standardDuty = Math.round(49069 + (propertyPrice - 1212000) * 0.055);
+  }
+
+  if (isFirstHomeBuyer) {
+    if (propertyPrice <= 800000) return 0;
+    if (propertyPrice <= 1000000) {
+      return Math.round(standardDuty * ((propertyPrice - 800000) / 200000));
+    }
+  }
+
+  return standardDuty;
+}
+
+/**
+ * Queensland (Brisbane) Stamp Duty calculation
+ */
+export function calculateQueenslandStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
+  if (propertyPrice <= 0) return 0;
+
+  let standardDuty = 0;
+  if (propertyPrice <= 350000) {
+    standardDuty = Math.round(propertyPrice * 0.01);
+  } else if (propertyPrice <= 540000) {
+    standardDuty = Math.round(3500 + (propertyPrice - 350000) * 0.035);
+  } else if (propertyPrice <= 1000000) {
+    standardDuty = Math.round(10150 + (propertyPrice - 540000) * 0.045);
+  } else {
+    standardDuty = Math.round(30850 + (propertyPrice - 1000000) * 0.0575);
+  }
+
+  if (isFirstHomeBuyer) {
+    if (propertyPrice <= 700000) return 0;
+    if (propertyPrice <= 800000) {
+      return Math.round(standardDuty * ((propertyPrice - 700000) / 100000));
+    }
+  }
+
+  return standardDuty;
+}
+
 /**
  * South Australia (Adelaide) Stamp Duty calculation
  * (Note: SA offers first home buyer stamp duty relief on eligible new homes, with sliding scale on existing)
  */
-export function calculateSouthAustraliaStampDuty(propertyPrice: number, isFirstHomeBuyer: boolean = true): number {
+export function calculateSouthAustraliaStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
   if (propertyPrice <= 0) return 0;
 
   // SA standard residential scale:
@@ -256,7 +488,10 @@ export function calculateSouthAustraliaStampDuty(propertyPrice: number, isFirstH
  * Victoria (Melbourne) Stamp Duty calculation
  * (Note: VIC First Home Buyer duty exemption up to $600k, concession up to $750k)
  */
-export function calculateVictoriaStampDuty(propertyPrice: number, isFirstHomeBuyer: boolean = true): number {
+export function calculateVictoriaStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
   if (propertyPrice <= 0) return 0;
 
   if (isFirstHomeBuyer) {
@@ -278,6 +513,140 @@ export function calculateVictoriaStampDuty(propertyPrice: number, isFirstHomeBuy
     return Math.round(base + excess * 0.06);
   } else {
     return Math.round(propertyPrice * 0.04);
+  }
+}
+
+/**
+ * Western Australia (Perth) Stamp Duty calculation
+ */
+export function calculateWesternAustraliaStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
+  if (propertyPrice <= 0) return 0;
+
+  let standardDuty = 0;
+  if (propertyPrice <= 120000) {
+    standardDuty = Math.round(propertyPrice * 0.019);
+  } else if (propertyPrice <= 150000) {
+    standardDuty = Math.round(2280 + (propertyPrice - 120000) * 0.0285);
+  } else if (propertyPrice <= 360000) {
+    standardDuty = Math.round(3135 + (propertyPrice - 150000) * 0.038);
+  } else if (propertyPrice <= 725000) {
+    standardDuty = Math.round(11115 + (propertyPrice - 360000) * 0.0475);
+  } else {
+    standardDuty = Math.round(28453 + (propertyPrice - 725000) * 0.0515);
+  }
+
+  if (isFirstHomeBuyer) {
+    if (propertyPrice <= 450000) return 0;
+    if (propertyPrice <= 600000) {
+      return Math.min(standardDuty, Math.round(((propertyPrice - 450000) / 100) * 15.01));
+    }
+  }
+
+  return standardDuty;
+}
+
+/**
+ * Tasmania (Hobart) Stamp Duty calculation
+ */
+export function calculateTasmaniaStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
+  if (propertyPrice <= 0) return 0;
+
+  if (isFirstHomeBuyer && propertyPrice <= 750000) {
+    return 0;
+  }
+
+  if (propertyPrice <= 3000) return 50;
+  if (propertyPrice <= 25000) return Math.round(50 + (propertyPrice - 3000) * 0.0175);
+  if (propertyPrice <= 75000) return Math.round(435 + (propertyPrice - 25000) * 0.0225);
+  if (propertyPrice <= 200000) return Math.round(1560 + (propertyPrice - 75000) * 0.035);
+  if (propertyPrice <= 375000) return Math.round(5935 + (propertyPrice - 200000) * 0.04);
+  if (propertyPrice <= 725000) return Math.round(12935 + (propertyPrice - 375000) * 0.0425);
+  return Math.round(27810 + (propertyPrice - 725000) * 0.045);
+}
+
+/**
+ * Australian Capital Territory (Canberra) Stamp Duty calculation
+ */
+export function calculateActStampDuty(
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true
+): number {
+  if (propertyPrice <= 0) return 0;
+
+  if (isFirstHomeBuyer && propertyPrice <= 1000000) {
+    return 0;
+  }
+
+  if (propertyPrice <= 260000) return Math.round(propertyPrice * 0.0049);
+  if (propertyPrice <= 300000) return Math.round(1274 + (propertyPrice - 260000) * 0.022);
+  if (propertyPrice <= 500000) return Math.round(2154 + (propertyPrice - 300000) * 0.034);
+  if (propertyPrice <= 750000) return Math.round(8954 + (propertyPrice - 500000) * 0.0432);
+  if (propertyPrice <= 1000000) return Math.round(19754 + (propertyPrice - 750000) * 0.059);
+  if (propertyPrice <= 1455000) return Math.round(34504 + (propertyPrice - 1000000) * 0.064);
+  return Math.round(propertyPrice * 0.0454);
+}
+
+/**
+ * Northern Territory (Darwin) Stamp Duty calculation
+ */
+export function calculateNorthernTerritoryStampDuty(
+  propertyPrice: number,
+  _isFirstHomeBuyer: boolean = true
+): number {
+  if (propertyPrice <= 0) return 0;
+
+  if (propertyPrice <= 525000) {
+    const v = propertyPrice / 1000;
+    return Math.round(0.06571441 * v * v + 15 * v);
+  }
+  if (propertyPrice <= 3000000) {
+    return Math.round(propertyPrice * 0.0495);
+  }
+  return Math.round(propertyPrice * 0.0575);
+}
+
+/**
+ * Unified stamp duty / transfer tax calculator across all Australian states & territories
+ * as well as custom non-Australian locations (optional manual override).
+ */
+export function calculateStampDuty(
+  locationCode: PropertyLocationCode,
+  propertyPrice: number,
+  isFirstHomeBuyer: boolean = true,
+  customStampDuty?: number | null
+): number {
+  if (customStampDuty !== null && customStampDuty !== undefined && Number.isFinite(customStampDuty)) {
+    return Math.max(0, Math.round(customStampDuty));
+  }
+  if (locationCode === "CUSTOM" || propertyPrice <= 0) {
+    return 0;
+  }
+
+  switch (locationCode) {
+    case "NSW":
+      return calculateNewSouthWalesStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "VIC":
+      return calculateVictoriaStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "QLD":
+      return calculateQueenslandStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "SA":
+      return calculateSouthAustraliaStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "WA":
+      return calculateWesternAustraliaStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "TAS":
+      return calculateTasmaniaStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "ACT":
+      return calculateActStampDuty(propertyPrice, isFirstHomeBuyer);
+    case "NT":
+      return calculateNorthernTerritoryStampDuty(propertyPrice, isFirstHomeBuyer);
+    default:
+      return 0;
   }
 }
 

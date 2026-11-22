@@ -316,7 +316,7 @@ export const cashFlowScheduledItems = pgTable(
 );
 
 // ============================================================================
-// 11. PROPERTY GOAL & DEPOSIT MODELING (Adelaide / Melbourne 2029 Target)
+// 11. PROPERTY GOAL & DEPOSIT MODELING (Configurable Target, Location & Schemes)
 // ============================================================================
 export const propertyGoals = pgTable(
   "property_goals",
@@ -325,16 +325,32 @@ export const propertyGoals = pgTable(
     userId: uuid("user_id")
       .references(() => users.id, { onDelete: "cascade" })
       .notNull(),
+    goalName: varchar("goal_name", { length: 150 }).default("Mortgage Deposit Goal").notNull(),
+    targetDate: date("target_date", { mode: "string" }).default("2029-07-01").notNull(),
     targetYear: integer("target_year").default(2029).notNull(),
-    targetCity: varchar("target_city", { length: 100 }).default("Adelaide").notNull(), // 'Adelaide' | 'Melbourne'
-    targetPropertyPrice: numeric("target_property_price", { precision: 12, scale: 2 }).notNull(), // e.g. $850,000.00
-    targetDepositPct: numeric("target_deposit_pct", { precision: 5, scale: 2 }).default("20.00").notNull(), // e.g. 20.00%
-    targetDepositAmount: numeric("target_deposit_amount", { precision: 12, scale: 2 }).notNull(), // e.g. $170,000.00
+    locationCode: varchar("location_code", { length: 20 }).default("SA").notNull(), // 'NSW' | 'VIC' | 'QLD' | 'SA' | 'WA' | 'TAS' | 'ACT' | 'NT' | 'CUSTOM'
+    targetCity: varchar("target_city", { length: 100 }).default("Adelaide").notNull(),
+    customLocationName: varchar("custom_location_name", { length: 150 }),
+    isFirstHomeBuyer: boolean("is_first_home_buyer").default(true).notNull(),
+    targetPropertyPrice: numeric("target_property_price", { precision: 12, scale: 2 }).notNull(),
+    targetDepositPct: numeric("target_deposit_pct", { precision: 5, scale: 2 }).default("20.00").notNull(),
+    targetDepositAmount: numeric("target_deposit_amount", { precision: 12, scale: 2 }).notNull(),
     estimatedStampDuty: numeric("estimated_stamp_duty", { precision: 12, scale: 2 }).default("0.00").notNull(),
+    customStampDuty: numeric("custom_stamp_duty", { precision: 12, scale: 2 }),
     estimatedLmi: numeric("estimated_lmi", { precision: 12, scale: 2 }).default("0.00").notNull(), // Lenders Mortgage Insurance
     estimatedConveyancingAndFees: numeric("estimated_conveyancing_fees", { precision: 12, scale: 2 }).default("4000.00").notNull(),
+    useLiveLiquidSavings: boolean("use_live_liquid_savings").default(true).notNull(),
     currentSavingsAllocated: numeric("current_savings_allocated", { precision: 12, scale: 2 }).default("0.00").notNull(),
     monthlySavingsContribution: numeric("monthly_savings_contribution", { precision: 12, scale: 2 }).default("0.00").notNull(),
+    useFhss: boolean("use_fhss").default(false).notNull(),
+    fhssMarginalTaxRatePct: numeric("fhss_marginal_tax_rate_pct", { precision: 5, scale: 2 }).default("32.50").notNull(),
+    useDhoas: boolean("use_dhoas").default(false).notNull(),
+    dhoasMode: varchar("dhoas_mode", { length: 20 }).default("auto").notNull(), // 'auto' | 'tier1' | 'tier2' | 'tier3' | 'custom'
+    dhoasEnlistmentDate: date("dhoas_enlistment_date", { mode: "string" }),
+    dhoasServiceType: varchar("dhoas_service_type", { length: 20 }).default("permanent").notNull(),
+    dhoasMonthlySubsidy: numeric("dhoas_monthly_subsidy", { precision: 12, scale: 2 }),
+    dhoasLoanCap: numeric("dhoas_loan_cap", { precision: 12, scale: 2 }),
+    dhoasLumpSumAmount: numeric("dhoas_lump_sum_amount", { precision: 12, scale: 2 }).default("0.00").notNull(),
     notes: text("notes"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

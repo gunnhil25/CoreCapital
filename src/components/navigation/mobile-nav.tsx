@@ -16,7 +16,7 @@ const mobileItems = [
   { name: "Ledger", href: "/transactions", icon: Receipt },
   { name: "Add", href: "/transactions?action=new", icon: PlusCircle, isPrimary: true },
   { name: "Subs", href: "/subscriptions", icon: Repeat },
-  { name: "2029 Goal", href: "/property-goals", icon: Home },
+  { name: "Property", href: "/property-goals", icon: Home },
 ];
 
 export function MobileNav() {

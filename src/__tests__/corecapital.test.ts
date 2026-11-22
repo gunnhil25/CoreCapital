@@ -9,11 +9,26 @@ vi.mock("next/cache", () => ({
 import {
   calculateFhssRelease,
   calculateDhoasEntitlement,
+  calculateNewSouthWalesStampDuty,
+  calculateQueenslandStampDuty,
   calculateSouthAustraliaStampDuty,
   calculateVictoriaStampDuty,
+  calculateWesternAustraliaStampDuty,
+  calculateTasmaniaStampDuty,
+  calculateActStampDuty,
+  calculateNorthernTerritoryStampDuty,
+  calculateStampDuty,
+  getLocationDisplayLabel,
   calculateAnnualizedSubscriptionCost,
   getAustralianFinancialYear,
 } from "@/lib/australian-finance";
+import {
+  getPropertyGoalModelAction,
+  savePropertyGoalAction,
+  deletePropertyGoalAction,
+  addFhssContributionAction,
+  deleteFhssContributionAction,
+} from "@/actions/property-goals";
 import {
   normalizeDate,
   cleanMerchantName,
@@ -129,6 +144,66 @@ describe("Australian Finance Calculation Engine", () => {
       calculateVictoriaStampDuty(675000, false)
     );
     expect(calculateVictoriaStampDuty(950000, true)).toBe(48670);
+  });
+
+  it("calculates stamp duty across all 8 Australian states/territories and custom locations", () => {
+    expect(calculateNewSouthWalesStampDuty(750000, true)).toBe(0);
+    expect(calculateNewSouthWalesStampDuty(900000, true)).toBeGreaterThan(0);
+    expect(calculateNewSouthWalesStampDuty(900000, true)).toBeLessThan(
+      calculateNewSouthWalesStampDuty(900000, false)
+    );
+
+    expect(calculateQueenslandStampDuty(650000, true)).toBe(0);
+    expect(calculateQueenslandStampDuty(750000, true)).toBeGreaterThan(0);
+    expect(calculateQueenslandStampDuty(750000, false)).toBeGreaterThan(
+      calculateQueenslandStampDuty(750000, true)
+    );
+
+    expect(calculateWesternAustraliaStampDuty(420000, true)).toBe(0);
+    expect(calculateWesternAustraliaStampDuty(520000, true)).toBeGreaterThan(0);
+    expect(calculateWesternAustraliaStampDuty(520000, true)).toBeLessThan(
+      calculateWesternAustraliaStampDuty(520000, false)
+    );
+
+    expect(calculateTasmaniaStampDuty(700000, true)).toBe(0);
+    expect(calculateTasmaniaStampDuty(800000, true)).toBeGreaterThan(0);
+
+    expect(calculateActStampDuty(900000, true)).toBe(0);
+    expect(calculateActStampDuty(1100000, true)).toBeGreaterThan(0);
+
+    expect(calculateNorthernTerritoryStampDuty(500000, true)).toBeGreaterThan(0);
+    expect(calculateNorthernTerritoryStampDuty(700000, true)).toBe(Math.round(700000 * 0.0495));
+
+    expect(calculateStampDuty("NSW", 750000, true)).toBe(0);
+    expect(calculateStampDuty("QLD", 900000, false)).toBe(calculateQueenslandStampDuty(900000, false));
+    expect(calculateStampDuty("CUSTOM", 800000, false)).toBe(0);
+    expect(calculateStampDuty("CUSTOM", 800000, false, 24500)).toBe(24500);
+    expect(calculateStampDuty("SA", 850000, true, 12000)).toBe(12000);
+
+    expect(getLocationDisplayLabel("WA", "Fremantle")).toBe("Fremantle, WA");
+    expect(getLocationDisplayLabel("CUSTOM", "London, UK")).toBe("London, UK");
+  });
+
+  it("supports configurable DHOAS target dates, fixed tiers, custom amounts, and lump sums", () => {
+    const fixedTier3 = calculateDhoasEntitlement("2021-03-01", "permanent", "2033-05-01", {
+      mode: "tier3",
+    });
+    expect(fixedTier3.targetYear).toBe(2033);
+    expect(fixedTier3.projectedTier.tier).toBe(3);
+    expect(fixedTier3.effectiveLoanCap).toBe(772000);
+
+    const customDhoas = calculateDhoasEntitlement("2021-03-01", "reserve", "2030-01-15", {
+      mode: "custom",
+      customMonthlySubsidy: 650,
+      customLoanCap: 620000,
+      lumpSumAmount: 18500,
+    });
+    expect(customDhoas.targetYear).toBe(2030);
+    expect(customDhoas.serviceType).toBe("reserve");
+    expect(customDhoas.effectiveMonthlySubsidy).toBe(650);
+    expect(customDhoas.effectiveLoanCap).toBe(620000);
+    expect(customDhoas.annualSubsidyValue).toBe(650 * 12);
+    expect(customDhoas.lumpSumAmount).toBe(18500);
   });
 
   it("annualizes subscription costs accurately across billing cycles", () => {
@@ -682,5 +757,150 @@ describe("Theme Mode Helpers", () => {
     expect(getNextTheme("dark")).toBe("light");
     expect(getNextTheme("light")).toBe("dark");
     expect(THEME_INIT_SCRIPT).toContain(THEME_STORAGE_KEY);
+  });
+});
+
+describe("Configurable Property Goal Actions & Schemes", () => {
+  it("supports custom goal creation without hardcoded 2029 defaults, FHSS/DHOAS toggles, and custom DHOAS amounts", async () => {
+    const status = await getAuthStatusAction();
+    if (!status.initialized) {
+      await setupInitialAdminAction({
+        name: "Goal Tester",
+        email: "goals@corecapital.local",
+        password: "GoalPassword123!",
+        baseCurrency: "AUD",
+        seedMode: "clean",
+      });
+    } else {
+      await resetMyWorkspaceAction("clean");
+    }
+
+    const initial = await getPropertyGoalModelAction();
+    expect(initial.hasGoal).toBe(false);
+    expect(initial.goal).toBeNull();
+
+    // Log an FHSS contribution first while FHSS is turned OFF on the goal
+    const contribRes = await addFhssContributionAction({
+      amount: 15000,
+      financialYear: "2026-27",
+      contributionType: "concessional",
+      fundName: "AustralianSuper",
+    });
+    expect(contribRes.success).toBe(true);
+
+    // Save non-Australian custom goal with FHSS & DHOAS both OFF
+    const customSave = await savePropertyGoalAction({
+      goalName: "London Flat Deposit",
+      targetDate: "2031-03-15",
+      locationCode: "CUSTOM",
+      targetCity: "London, UK",
+      customLocationName: "London, UK",
+      isFirstHomeBuyer: false,
+      targetPrice: 650000,
+      depositPct: 15,
+      customStampDuty: 20000,
+      conveyancingFees: 2500,
+      estimatedLmi: 0,
+      useLiveLiquidSavings: false,
+      currentSavingsAllocated: 50000,
+      monthlySavingsPace: 2500,
+      useFhss: false,
+      fhssMarginalTaxRatePct: 37,
+      useDhoas: false,
+      dhoasMode: "auto",
+      dhoasEnlistmentDate: "2021-03-01",
+      dhoasServiceType: "permanent",
+      dhoasMonthlySubsidy: null,
+      dhoasLoanCap: null,
+      dhoasLumpSumAmount: 0,
+    });
+    expect(customSave.success).toBe(true);
+    expect(customSave.data?.hasGoal).toBe(true);
+    expect(customSave.data?.goal?.locationLabel).toBe("London, UK");
+    expect(customSave.data?.goal?.targetYear).toBe(2031);
+    expect(customSave.data?.goal?.targetDepositAmount).toBe(97500);
+    expect(customSave.data?.goal?.stampDuty).toBe(20000);
+    expect(customSave.data?.goal?.totalRequiredCash).toBe(120000);
+    // FHSS is OFF so totalCapitalReady reflects only allocated $50k
+    expect(customSave.data?.goal?.fhssReleaseEstimate).toBe(0);
+    expect(customSave.data?.goal?.totalCapitalReady).toBe(50000);
+    expect(customSave.data?.dhoas).toBeNull();
+
+    // Enable FHSS and verify totalCapitalReady includes FHSS release
+    const withFhss = await savePropertyGoalAction({
+      goalName: "Brisbane Deposit",
+      targetDate: "2031-03-15",
+      locationCode: "QLD",
+      targetCity: "Brisbane",
+      isFirstHomeBuyer: true,
+      targetPrice: 800000,
+      depositPct: 20,
+      customStampDuty: null,
+      conveyancingFees: 3850,
+      estimatedLmi: 0,
+      useLiveLiquidSavings: false,
+      currentSavingsAllocated: 50000,
+      monthlySavingsPace: 2500,
+      useFhss: true,
+      fhssMarginalTaxRatePct: 37,
+      useDhoas: false,
+      dhoasMode: "auto",
+      dhoasEnlistmentDate: "2021-03-01",
+      dhoasServiceType: "permanent",
+      dhoasMonthlySubsidy: null,
+      dhoasLoanCap: null,
+      dhoasLumpSumAmount: 0,
+    });
+    expect(withFhss.success).toBe(true);
+    expect(withFhss.data?.goal?.locationLabel).toBe("Brisbane, QLD");
+    expect(withFhss.data?.goal?.fhssReleaseEstimate).toBeGreaterThan(0);
+    expect(withFhss.data?.goal?.totalCapitalReady).toBeGreaterThan(50000);
+    expect(withFhss.data?.dhoas).toBeNull();
+
+    // Enable DHOAS with custom subsidy, loan cap, and lump sum
+    const withDhoas = await savePropertyGoalAction({
+      goalName: "Brisbane Deposit",
+      targetDate: "2031-03-15",
+      locationCode: "QLD",
+      targetCity: "Brisbane",
+      isFirstHomeBuyer: true,
+      targetPrice: 800000,
+      depositPct: 20,
+      customStampDuty: null,
+      conveyancingFees: 3850,
+      estimatedLmi: 0,
+      useLiveLiquidSavings: false,
+      currentSavingsAllocated: 50000,
+      monthlySavingsPace: 2500,
+      useFhss: true,
+      fhssMarginalTaxRatePct: 37,
+      useDhoas: true,
+      dhoasMode: "custom",
+      dhoasEnlistmentDate: "2021-03-01",
+      dhoasServiceType: "permanent",
+      dhoasMonthlySubsidy: 650,
+      dhoasLoanCap: 620000,
+      dhoasLumpSumAmount: 15000,
+    });
+    expect(withDhoas.success).toBe(true);
+    expect(withDhoas.data?.dhoas?.effectiveMonthlySubsidy).toBe(650);
+    expect(withDhoas.data?.dhoas?.effectiveLoanCap).toBe(620000);
+    expect(withDhoas.data?.dhoas?.lumpSumAmount).toBe(15000);
+    expect(withDhoas.data?.dhoas?.targetYear).toBe(2031);
+    expect(withDhoas.data?.goal?.totalCapitalReady).toBeCloseTo(
+      withFhss.data!.goal!.totalCapitalReady + 15000,
+      2
+    );
+
+    // Delete FHSS contribution and delete goal
+    const contribId = withDhoas.data!.contributions[0].id;
+    const afterDelContrib = await deleteFhssContributionAction(contribId);
+    expect(afterDelContrib.success).toBe(true);
+    expect(afterDelContrib.data?.contributions).toHaveLength(0);
+
+    const afterDelGoal = await deletePropertyGoalAction();
+    expect(afterDelGoal.success).toBe(true);
+    expect(afterDelGoal.data?.hasGoal).toBe(false);
+    expect(afterDelGoal.data?.goal).toBeNull();
   });
 });

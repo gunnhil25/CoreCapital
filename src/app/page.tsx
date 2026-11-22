@@ -38,11 +38,17 @@ const HISTORICAL_BASELINE_MONTHS: MonthlyCashFlowChartPoint[] = [
 ];
 
 export default async function DashboardPage() {
-  const [{ goal, dhoas, fhss }, budgets, transactions] = await Promise.all([
-    getPropertyGoalModelAction(),
-    getBudgetsAction(),
-    getTransactionsAction(),
-  ]);
+  const [{ hasGoal, goal, liveLiquidAccountSavings, baseCurrency, dhoas, fhss }, budgets, transactions] =
+    await Promise.all([
+      getPropertyGoalModelAction(),
+      getBudgetsAction(),
+      getTransactionsAction(),
+    ]);
+
+  const progressPct =
+    goal && goal.totalRequiredCash > 0
+      ? Math.min(100, Math.round((goal.totalCapitalReady / goal.totalRequiredCash) * 100))
+      : 0;
 
   const totalBudgetLimit = budgets.reduce((sum, b) => sum + b.allocatedAmount, 0);
   const totalBudgetSpent = budgets.reduce((sum, b) => sum + b.spentAmount, 0);
@@ -168,7 +174,7 @@ export default async function DashboardPage() {
               <Wallet className="h-4 w-4 text-sky-500" />
             </CardDescription>
             <CardTitle className="text-xl sm:text-2xl font-bold font-mono tracking-tight text-foreground">
-              {formatCurrency(goal.currentCashSavings)}
+              {formatCurrency(liveLiquidAccountSavings, baseCurrency)}
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-0">
@@ -239,104 +245,168 @@ export default async function DashboardPage() {
 
       {/* 2-Column Section: Australian Property Deposit & Budget Tracking */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Australian Schemes & 2029 Goal Card */}
+        {/* Mortgage Deposit Goal Card */}
         <Card className="lg:col-span-2 border-border/60 overflow-hidden">
           <CardHeader className="bg-gradient-to-r from-sky-500/10 via-indigo-500/10 to-transparent pb-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <div className="h-8 w-8 rounded-lg bg-sky-500/20 text-sky-500 flex items-center justify-center">
                   <Home className="h-4 w-4" />
                 </div>
                 <div>
                   <CardTitle className="text-base sm:text-lg">
-                    2029 Property Deposit Target ({goal.targetCity})
+                    {hasGoal && goal
+                      ? `${goal.goalName} (${goal.locationLabel})`
+                      : "Mortgage Deposit Goal"}
                   </CardTitle>
                   <CardDescription>
-                    Algorithmic FHSS super scheme + DHOAS Defence subsidy tier projection
+                    {hasGoal && goal
+                      ? `${goal.depositPct}% deposit on ${formatCurrency(goal.targetPrice, baseCurrency)}${
+                          goal.useFhss || goal.useDhoas
+                            ? ` • ${[
+                                goal.useFhss ? "FHSS" : null,
+                                goal.useDhoas ? "DHOAS" : null,
+                              ]
+                                .filter(Boolean)
+                                .join(" + ")} Enabled`
+                            : ""
+                        }`
+                      : "Configure your target purchase date, location, deposit size, and optional schemes"}
                   </CardDescription>
                 </div>
               </div>
-              <Badge variant="info" className="font-mono">
-                2029 Horizon
-              </Badge>
+              {hasGoal && goal ? (
+                <Badge variant="info" className="font-mono shrink-0">
+                  {goal.targetYear} Target
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="font-mono shrink-0">
+                  Not Configured
+                </Badge>
+              )}
             </div>
           </CardHeader>
           <CardContent className="p-5 space-y-4">
-            {/* Progress Bar */}
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-medium">
-                <span className="text-muted-foreground">Deposit & Purchase Cash Ready</span>
-                <span className="font-mono">
-                  {formatCurrency(goal.currentCashSavings + fhss.estimatedTotalReleaseAmount)} /{" "}
-                  {formatCurrency(goal.totalRequiredCash)} (
-                  {Math.round(
-                    ((goal.currentCashSavings + fhss.estimatedTotalReleaseAmount) /
-                      goal.totalRequiredCash) *
-                      100
+            {!hasGoal || !goal ? (
+              <div className="rounded-lg border border-dashed bg-muted/20 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-foreground">
+                    No mortgage deposit target configured yet
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Set a custom property goal for any Australian state or international location, choose your target date, and toggle FHSS or DHOAS support.
+                  </p>
+                </div>
+                <Button size="sm" asChild className="shrink-0 gap-1">
+                  <Link href="/property-goals">
+                    Set Up Deposit Goal
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Link>
+                </Button>
+              </div>
+            ) : (
+              <>
+                {/* Progress Bar */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-medium">
+                    <span className="text-muted-foreground">Deposit & Purchase Cash Ready</span>
+                    <span className="font-mono">
+                      {formatCurrency(goal.totalCapitalReady, baseCurrency)} /{" "}
+                      {formatCurrency(goal.totalRequiredCash, baseCurrency)} ({progressPct}%)
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-sky-500 to-indigo-600 rounded-full transition-all duration-500"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Scheme / Key Metric Tiles */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  {goal.useFhss ? (
+                    <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold flex items-center gap-1.5">
+                          <Shield className="h-3.5 w-3.5 text-sky-500" />
+                          FHSS Super Withdrawable
+                        </span>
+                        <span className="font-mono text-xs font-bold text-sky-500">
+                          {formatCurrency(fhss.estimatedTotalReleaseAmount, baseCurrency)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Saved {formatCurrency(fhss.estimatedTaxSaved, baseCurrency)} tax • Marginal{" "}
+                        {goal.fhssMarginalTaxRatePct}%
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold flex items-center gap-1.5">
+                          <Home className="h-3.5 w-3.5 text-sky-500" />
+                          Target Deposit ({goal.depositPct}%)
+                        </span>
+                        <span className="font-mono text-xs font-bold text-sky-500">
+                          {formatCurrency(goal.targetDepositAmount, baseCurrency)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Duty/Tax: {formatCurrency(goal.stampDuty, baseCurrency)} • Fees:{" "}
+                        {formatCurrency(goal.conveyancingFees, baseCurrency)}
+                      </p>
+                    </div>
                   )}
-                  %)
-                </span>
-              </div>
-              <div className="h-2.5 w-full bg-muted rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-sky-500 to-indigo-600 rounded-full transition-all duration-500"
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      Math.round(
-                        ((goal.currentCashSavings + fhss.estimatedTotalReleaseAmount) /
-                          goal.totalRequiredCash) *
-                          100
-                      )
-                    )}%`,
-                  }}
-                />
-              </div>
-            </div>
 
-            {/* Scheme Badges */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-              <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold flex items-center gap-1.5">
-                    <Shield className="h-3.5 w-3.5 text-sky-500" />
-                    FHSS Super Withdrawable
-                  </span>
-                  <span className="font-mono text-xs font-bold text-sky-500">
-                    {formatCurrency(fhss.estimatedTotalReleaseAmount)}
-                  </span>
+                  {goal.useDhoas && dhoas ? (
+                    <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold flex items-center gap-1.5">
+                          <Layers className="h-3.5 w-3.5 text-indigo-500" />
+                          DHOAS Defence Subsidy
+                        </span>
+                        <Badge variant="outline" className="text-[10px] py-0 font-mono">
+                          {dhoas.mode === "custom"
+                            ? "Custom"
+                            : dhoas.projectedTier.name.split(" (")[0]}{" "}
+                          ({goal.targetYear})
+                        </Badge>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Loan cap {formatCurrency(dhoas.effectiveLoanCap, baseCurrency)} • ~
+                        {formatCurrency(dhoas.effectiveMonthlySubsidy, baseCurrency)}/mo relief
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold flex items-center gap-1.5">
+                          <TrendingUp className="h-3.5 w-3.5 text-indigo-500" />
+                          Required Monthly Pace
+                        </span>
+                        <span className="font-mono text-xs font-bold text-indigo-500">
+                          {formatCurrency(goal.requiredMonthlySavingsRate, baseCurrency)}/mo
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Remaining Gap: {formatCurrency(goal.netGap, baseCurrency)} •{" "}
+                        {goal.monthsUntilTarget} months
+                      </p>
+                    </div>
+                  )}
                 </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Saved {formatCurrency(fhss.estimatedTaxSaved)} tax • Deemed SIC ~7.15%
-                </p>
-              </div>
 
-              <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold flex items-center gap-1.5">
-                    <Layers className="h-3.5 w-3.5 text-indigo-500" />
-                    DHOAS Defence Subsidy
-                  </span>
-                  <Badge variant="outline" className="text-[10px] py-0 font-mono">
-                    {dhoas.projected2029Tier.name.split(" ")[0]}{" "}
-                    {dhoas.projected2029Tier.name.split(" ")[1]} (2029)
-                  </Badge>
+                <div className="pt-2 flex justify-end">
+                  <Button variant="ghost" size="sm" asChild className="text-xs gap-1">
+                    <Link href="/property-goals">
+                      Configure Deposit Goal & Scenarios
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </Link>
+                  </Button>
                 </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Subsidized loan cap ${dhoas.projected2029Tier.subsidisedLoanCap.toLocaleString()} • ~$
-                  {dhoas.projected2029Tier.estimatedMonthlySubsidy}/mo relief
-                </p>
-              </div>
-            </div>
-
-            <div className="pt-2 flex justify-end">
-              <Button variant="ghost" size="sm" asChild className="text-xs gap-1">
-                <Link href="/property-goals">
-                  Detailed Scheme Calculator & Scenarios
-                  <ChevronRight className="h-3.5 w-3.5" />
-                </Link>
-              </Button>
-            </div>
+              </>
+            )}
           </CardContent>
         </Card>
 

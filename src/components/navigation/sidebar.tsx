@@ -35,7 +35,7 @@ const navItems = [
     items: [
       { name: "Subscriptions Monitor", href: "/subscriptions", icon: Repeat },
       { name: "Cash Flow Projections", href: "/cash-flow", icon: TrendingUp },
-      { name: "2029 Property & DHOAS", href: "/property-goals", icon: Home },
+      { name: "Property Goal", href: "/property-goals", icon: Home },
       { name: "Budgets & Caps", href: "/budgets", icon: PieChart },
     ],
   },
