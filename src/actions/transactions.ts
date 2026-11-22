@@ -10,6 +10,7 @@ import {
   TransactionWithLedger,
 } from "@/lib/store";
 import { computeDeduplicationHash } from "@/lib/csv-engine";
+import { formatCategoryDisplayLabel } from "@/lib/category-utils";
 
 export interface SplitItemInput {
   categoryId: string;
@@ -138,7 +139,7 @@ function buildLedgerEntriesForTx(params: {
           transactionId,
           accountId,
           categoryId: split.categoryId || null,
-          categoryName: cat?.name || "Uncategorized",
+          categoryName: cat ? formatCategoryDisplayLabel(cat.id, categories) : "Uncategorized",
           categoryColor: cat?.color || "#64748b",
           entryType: amount > 0 ? "credit" : "debit",
           amount: split.amount.toFixed(2),
@@ -158,7 +159,7 @@ function buildLedgerEntriesForTx(params: {
         transactionId,
         accountId,
         categoryId: categoryId || null,
-        categoryName: cat?.name || "Uncategorized",
+        categoryName: cat ? formatCategoryDisplayLabel(cat.id, categories) : "Uncategorized",
         categoryColor: cat?.color || "#64748b",
         entryType: amount > 0 ? "credit" : "debit",
         amount: Math.abs(amount).toFixed(2),

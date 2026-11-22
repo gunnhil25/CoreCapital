@@ -13,18 +13,21 @@ import {
   Cell,
   CartesianGrid,
 } from "recharts";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
+import type {
+  CategoryDistributionPoint,
+  CategorySubSlice,
+} from "@/lib/category-utils";
+
+export type { CategoryDistributionPoint, CategorySubSlice };
 
 export interface MonthlyCashFlowChartPoint {
   month: string;
   income: number;
   expenses: number;
-}
-
-export interface CategoryDistributionPoint {
-  name: string;
-  value: number;
-  color: string;
 }
 
 const defaultMonthlyCashFlowData: MonthlyCashFlowChartPoint[] = [
@@ -52,6 +55,7 @@ interface DashboardChartsProps {
 
 export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsProps) {
   const [mounted, setMounted] = useState(false);
+  const [selectedParentKey, setSelectedParentKey] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -61,6 +65,20 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
     monthlyData !== undefined ? monthlyData : defaultMonthlyCashFlowData;
   const resolvedCategoryData =
     categoryData !== undefined ? categoryData : defaultCategoryDistributionData;
+
+  const drilledParent = selectedParentKey
+    ? resolvedCategoryData.find(
+        (c) => (c.id || c.name) === selectedParentKey && c.children && c.children.length > 0
+      )
+    : undefined;
+
+  const activeSlices = drilledParent?.children ?? resolvedCategoryData;
+  const activeTotal = drilledParent
+    ? drilledParent.value
+    : resolvedCategoryData.reduce((s, item) => s + item.value, 0);
+  const hasAnyDrilldown = resolvedCategoryData.some(
+    (c) => c.children && c.children.length > 0
+  );
 
   if (!mounted) {
     return (
@@ -135,15 +153,53 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
         </div>
       </div>
 
-      {/* Spending Breakdown Donut Chart */}
+      {/* Spending Breakdown Donut Chart (with Sub-Category Drilldown) */}
       <div className="rounded-xl border bg-card p-5 space-y-4">
-        <div>
-          <h3 className="text-sm font-semibold">Spending Distribution</h3>
-          <p className="text-xs text-muted-foreground">Current Ledger & Budget Allocation</p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            {drilledParent ? (
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedParentKey(null)}
+                    className="h-6 px-1.5 text-[11px] -ml-1.5"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5 mr-0.5" />
+                    All
+                  </Button>
+                  <Badge variant="outline" className="text-[11px] font-semibold">
+                    <span
+                      className="h-2 w-2 rounded-full mr-1.5 inline-block"
+                      style={{ backgroundColor: drilledParent.color }}
+                    />
+                    {drilledParent.name} • {formatCurrency(drilledParent.value)}
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Sub-category breakdown ({drilledParent.children!.length} segments)
+                </p>
+              </div>
+            ) : (
+              <>
+                <h3 className="text-sm font-semibold">Spending Distribution</h3>
+                <p className="text-xs text-muted-foreground">
+                  {hasAnyDrilldown
+                    ? "Click a slice or category with sub-categories to drill down"
+                    : "Current Ledger & Budget Allocation"}
+                </p>
+              </>
+            )}
+          </div>
         </div>
 
-        <div className="h-48 w-full flex items-center justify-center">
-          {resolvedCategoryData.length === 0 ? (
+        <div
+          key={drilledParent ? drilledParent.id || drilledParent.name : "top-level"}
+          className="h-48 w-full flex items-center justify-center cc-animate-tab"
+        >
+          {activeSlices.length === 0 ? (
             <div className="h-full w-full rounded-lg border border-dashed flex items-center justify-center text-xs text-muted-foreground text-center px-4">
               No category spending recorded yet.
             </div>
@@ -151,20 +207,39 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
-                  data={resolvedCategoryData}
+                  data={activeSlices}
                   cx="50%"
                   cy="50%"
                   innerRadius={50}
                   outerRadius={75}
                   paddingAngle={3}
                   dataKey="value"
+                  className={!drilledParent && hasAnyDrilldown ? "cursor-pointer outline-none" : "outline-none"}
+                  onClick={(entry: any) => {
+                    if (drilledParent) return;
+                    const node = entry?.payload ?? entry;
+                    const key = node?.id || node?.name;
+                    if (node?.children?.length > 0 && key) {
+                      setSelectedParentKey(key);
+                    }
+                  }}
                 >
-                  {resolvedCategoryData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  {activeSlices.map((entry, index) => (
+                    <Cell
+                      key={`cell-${index}`}
+                      fill={entry.color}
+                      fillOpacity={
+                        "isDirectParentSpend" in entry && entry.isDirectParentSpend ? 0.65 : 1
+                      }
+                    />
                   ))}
                 </Pie>
                 <Tooltip
-                  formatter={(value: any) => [formatCurrency(value), "Amount"]}
+                  formatter={(value: any) => {
+                    const num = Number(value) || 0;
+                    const pct = activeTotal > 0 ? ((num / activeTotal) * 100).toFixed(1) : "0.0";
+                    return [`${formatCurrency(num)} (${pct}%)`, drilledParent ? "Sub-Category" : "Amount"];
+                  }}
                   contentStyle={{
                     backgroundColor: "hsl(var(--background))",
                     borderColor: "hsl(var(--border))",
@@ -179,13 +254,66 @@ export function DashboardCharts({ monthlyData, categoryData }: DashboardChartsPr
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-2 pt-2 border-t text-[11px]">
-          {resolvedCategoryData.slice(0, 6).map((item) => (
-            <div key={item.name} className="flex items-center gap-1.5 truncate">
-              <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
-              <span className="truncate text-muted-foreground">{item.name}</span>
-            </div>
-          ))}
+        <div className="grid grid-cols-2 gap-1.5 pt-2 border-t text-[11px]">
+          {(drilledParent ? activeSlices : activeSlices.slice(0, 6)).map((item) => {
+            const pct =
+              activeTotal > 0 ? Math.round((item.value / activeTotal) * 100) : 0;
+            const childCount =
+              !drilledParent && "children" in item && item.children
+                ? item.children.length
+                : 0;
+            const itemKey = ("id" in item && item.id) || item.name;
+
+            if (childCount > 0) {
+              return (
+                <button
+                  key={itemKey}
+                  type="button"
+                  onClick={() => setSelectedParentKey(itemKey)}
+                  className="flex items-center justify-between gap-1 px-1.5 py-1 rounded-md hover:bg-muted/60 text-left transition-colors group"
+                  title={`Inspect ${item.name} sub-categories`}
+                >
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span
+                      className="h-2 w-2 rounded-full shrink-0"
+                      style={{ backgroundColor: item.color }}
+                    />
+                    <span className="truncate font-medium text-foreground group-hover:text-primary">
+                      {item.name}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-0.5 text-[10px] font-mono text-muted-foreground shrink-0">
+                    <span>{childCount}</span>
+                    <ChevronRight className="h-3 w-3" />
+                  </span>
+                </button>
+              );
+            }
+
+            return (
+              <div
+                key={itemKey}
+                className="flex items-center justify-between gap-1 px-1 py-0.5 truncate"
+              >
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: item.color,
+                      opacity:
+                        "isDirectParentSpend" in item && item.isDirectParentSpend ? 0.65 : 1,
+                    }}
+                  />
+                  <span className="truncate text-muted-foreground">{item.name}</span>
+                </span>
+                {drilledParent && (
+                  <span className="text-[10px] font-mono text-muted-foreground shrink-0">
+                    {pct}%
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

@@ -9,6 +9,7 @@ import {
   SupportedBankFormat,
 } from "@/lib/csv-engine";
 import { findMatchingRule } from "@/lib/rule-engine";
+import { formatCategoryDisplayLabel } from "@/lib/category-utils";
 
 export interface ImportCsvResult {
   success: boolean;
@@ -101,7 +102,9 @@ export async function importBankStatementCsvAction(formData: FormData): Promise<
             transactionId: txId,
             accountId: account.id,
             categoryId: matchedCategory?.id || null,
-            categoryName: matchedCategory?.name || "Uncategorized",
+            categoryName: matchedCategory
+              ? formatCategoryDisplayLabel(matchedCategory.id, categories)
+              : "Uncategorized",
             categoryColor: matchedCategory?.color || "#64748b",
             entryType: row.amount > 0 ? "credit" : "debit",
             amount: Math.abs(row.amount).toFixed(2),

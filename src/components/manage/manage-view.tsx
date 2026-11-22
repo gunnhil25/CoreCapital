@@ -10,6 +10,8 @@ import {
   CheckCircle2,
   CornerDownRight,
   FolderTree,
+  GitMerge,
+  GripVertical,
   Pencil,
   Plus,
   RotateCcw,
@@ -23,7 +25,11 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatCurrency } from "@/lib/utils";
-import { sortAndFlattenCategories } from "@/lib/category-utils";
+import {
+  CategoryDropPosition,
+  computeCategoryDragResult,
+  sortAndFlattenCategories,
+} from "@/lib/category-utils";
 import { AccountRecord, CategoryRecord } from "@/lib/store";
 import {
   createAccountAction,
@@ -31,6 +37,8 @@ import {
   deleteAccountAction,
   deleteCategoryAction,
   ManageDataResponse,
+  mergeCategoryAction,
+  moveCategoryOrderAction,
   reorderCategoriesAction,
   toggleAccountActiveAction,
   updateAccountAction,
@@ -101,7 +109,15 @@ export function ManageView({
   const [catParentId, setCatParentId] = useState("");
   const [catColor, setCatColor] = useState("#6d5dfc");
   const [catModalError, setCatModalError] = useState<string | null>(null);
-  const [deleteCatTarget, setDeleteCatTarget] = useState<CategoryRecord | null>(null);
+  const [retireCatTarget, setRetireCatTarget] = useState<CategoryRecord | null>(null);
+  const [retireMode, setRetireMode] = useState<"merge" | "delete">("delete");
+  const [replacementCatId, setReplacementCatId] = useState("");
+  const [retireModalError, setRetireModalError] = useState<string | null>(null);
+  const [draggedCatId, setDraggedCatId] = useState<string | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{
+    targetId: string;
+    position: CategoryDropPosition;
+  } | null>(null);
 
   // Accounts state
   const [accModalMode, setAccModalMode] = useState<"create" | "edit" | null>(null);
@@ -287,20 +303,178 @@ export function ManageView({
     });
   };
 
-  const handleConfirmDeleteCategory = () => {
-    if (!deleteCatTarget) return;
+  const openRetireCategoryModal = (cat: CategoryRecord, initialMode: "merge" | "delete") => {
+    setRetireModalError(null);
+    const candidates = flattenedCategories.filter(
+      (c) => c.id !== cat.id && c.type === cat.type
+    );
+    const defaultReplacement =
+      (cat.parentId && candidates.find((c) => c.id === cat.parentId)?.id) ||
+      candidates[0]?.id ||
+      "";
+    setReplacementCatId(defaultReplacement);
+    setRetireMode(initialMode === "merge" && candidates.length > 0 ? "merge" : "delete");
+    setRetireCatTarget(cat);
+  };
+
+  const handleConfirmRetireCategory = () => {
+    if (!retireCatTarget) return;
     setFeedback(null);
+    setRetireModalError(null);
+
+    if (retireMode === "merge") {
+      if (!replacementCatId) {
+        setRetireModalError("Select a same-type replacement category to merge into.");
+        return;
+      }
+      startTransition(async () => {
+        const res = await mergeCategoryAction(retireCatTarget.id, replacementCatId);
+        if (!res.success || !res.data) {
+          setRetireModalError(res.error || "Failed to merge category.");
+          return;
+        }
+        const sourceName = retireCatTarget.name;
+        const targetName =
+          data.categories.find((c) => c.id === replacementCatId)?.name || "replacement";
+        setRetireCatTarget(null);
+        setData(res.data);
+        setFeedback({
+          type: "success",
+          text: `Merged "${sourceName}" into "${targetName}" (${res.summary?.reassignedEntries ?? 0} ledger entries & ${res.summary?.reassignedRules ?? 0} rules reassigned).`,
+        });
+        router.refresh();
+      });
+      return;
+    }
 
     startTransition(async () => {
-      const res = await deleteCategoryAction(deleteCatTarget.id);
-      const removedName = deleteCatTarget.name;
-      setDeleteCatTarget(null);
+      const res = await deleteCategoryAction(retireCatTarget.id);
+      const removedName = retireCatTarget.name;
+      setRetireCatTarget(null);
       if (!res.success || !res.data) {
         setFeedback({ type: "error", text: res.error || "Failed to delete category." });
         return;
       }
       setData(res.data);
       setFeedback({ type: "success", text: `Removed category "${removedName}".` });
+      router.refresh();
+    });
+  };
+
+  const resolveDropPosition = (
+    e: React.DragEvent<HTMLDivElement>,
+    targetCat: (typeof flattenedCategories)[number],
+    sourceId: string
+  ): CategoryDropPosition => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5;
+    const draggedCat = data.categories.find((c) => c.id === sourceId);
+    const draggedHasChildren = draggedCat
+      ? (childCountsByParent.get(draggedCat.id) || 0) > 0
+      : false;
+    const canDropInside = Boolean(
+      draggedCat &&
+        targetCat.depth === 0 &&
+        !draggedHasChildren &&
+        draggedCat.type === targetCat.type &&
+        draggedCat.id !== targetCat.id &&
+        draggedCat.parentId !== targetCat.id
+    );
+
+    if (canDropInside && ratio >= 0.28 && ratio <= 0.72) {
+      return "inside";
+    }
+    return ratio < 0.5 ? "before" : "after";
+  };
+
+  const handleDragStartCategory = (
+    e: React.DragEvent<HTMLDivElement>,
+    catId: string
+  ) => {
+    if (isPending) {
+      e.preventDefault();
+      return;
+    }
+    setDraggedCatId(catId);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", catId);
+  };
+
+  const handleDragOverCategory = (
+    e: React.DragEvent<HTMLDivElement>,
+    targetCat: (typeof flattenedCategories)[number]
+  ) => {
+    const sourceId = draggedCatId;
+    if (!sourceId || sourceId === targetCat.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const position = resolveDropPosition(e, targetCat, sourceId);
+    setDropIndicator((prev) =>
+      prev?.targetId === targetCat.id && prev.position === position
+        ? prev
+        : { targetId: targetCat.id, position }
+    );
+  };
+
+  const handleDropCategory = (
+    e: React.DragEvent<HTMLDivElement>,
+    targetCat: (typeof flattenedCategories)[number]
+  ) => {
+    e.preventDefault();
+    const sourceId = draggedCatId || e.dataTransfer.getData("text/plain");
+    const activePosition =
+      dropIndicator?.targetId === targetCat.id
+        ? dropIndicator.position
+        : resolveDropPosition(e, targetCat, sourceId);
+
+    setDraggedCatId(null);
+    setDropIndicator(null);
+
+    if (!sourceId || sourceId === targetCat.id) return;
+
+    const result = computeCategoryDragResult(
+      data.categories,
+      sourceId,
+      targetCat.id,
+      activePosition
+    );
+    if (!result.changed) return;
+
+    const snapshot = data;
+    const orderById = new Map(result.orderedIds.map((id, idx) => [id, idx * 10]));
+    setData((prev) => ({
+      ...prev,
+      categories: prev.categories.map((c) =>
+        c.id === sourceId
+          ? {
+              ...c,
+              parentId: result.parentChanged ? result.nextParentId : c.parentId,
+              sortOrder: orderById.get(c.id) ?? c.sortOrder,
+            }
+          : {
+              ...c,
+              sortOrder: orderById.get(c.id) ?? c.sortOrder,
+            }
+      ),
+    }));
+
+    startTransition(async () => {
+      const res = await moveCategoryOrderAction({
+        categoryId: sourceId,
+        ...(result.parentChanged ? { targetParentId: result.nextParentId } : {}),
+        orderedIds: result.orderedIds,
+      });
+
+      if (!res.success || !res.data) {
+        setData(snapshot);
+        setFeedback({
+          type: "error",
+          text: res.error || "Failed to update category order.",
+        });
+        return;
+      }
+
+      setData(res.data);
       router.refresh();
     });
   };
@@ -559,7 +733,7 @@ export function ManageView({
                   Category & Sub-Category Hierarchy
                 </CardTitle>
                 <CardDescription className="text-xs">
-                  Use ↑ / ↓ arrows to sort how categories appear in dropdowns across Transactions, Budgets, and Rules
+                  Drag rows by the grip handle (or use ↑ / ↓) to sort, or drop a sub-category onto another parent of the same type
                 </CardDescription>
               </div>
               <Badge variant="outline" className="text-[10px] font-mono">
@@ -590,15 +764,51 @@ export function ManageView({
                     const canMoveUp = sibIdx > 0;
                     const canMoveDown = sibIdx !== -1 && sibIdx < visibleSiblings.length - 1;
                     const childCount = childCountsByParent.get(cat.id) || 0;
+                    const usage = data.usageByCategory?.[cat.id] || {
+                      transactions: 0,
+                      rules: 0,
+                      budgets: 0,
+                    };
+                    const isDragged = draggedCatId === cat.id;
+                    const dropPos =
+                      dropIndicator?.targetId === cat.id ? dropIndicator.position : null;
+                    const sameTypeReplacementCount = flattenedCategories.filter(
+                      (c) => c.id !== cat.id && c.type === cat.type
+                    ).length;
 
                     return (
                       <div
                         key={cat.id}
-                        className={`px-4 py-3 flex items-center justify-between gap-3 hover:bg-muted/25 transition-colors ${
+                        draggable={!isPending}
+                        onDragStart={(e) => handleDragStartCategory(e, cat.id)}
+                        onDragOver={(e) => handleDragOverCategory(e, cat)}
+                        onDragLeave={() => {
+                          if (dropIndicator?.targetId === cat.id) {
+                            setDropIndicator(null);
+                          }
+                        }}
+                        onDrop={(e) => handleDropCategory(e, cat)}
+                        onDragEnd={() => {
+                          setDraggedCatId(null);
+                          setDropIndicator(null);
+                        }}
+                        className={`px-4 py-3 flex items-center justify-between gap-3 hover:bg-muted/25 transition-all ${
                           cat.depth === 1 ? "pl-10 bg-muted/10" : ""
+                        } ${isDragged ? "opacity-45 bg-muted/30" : ""} ${
+                          dropPos === "before" ? "border-t-2 border-t-primary" : ""
+                        } ${dropPos === "after" ? "border-b-2 border-b-primary" : ""} ${
+                          dropPos === "inside"
+                            ? "ring-2 ring-inset ring-primary/60 bg-primary/10"
+                            : ""
                         }`}
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
+                          <span
+                            className="cursor-grab active:cursor-grabbing text-muted-foreground/70 hover:text-foreground shrink-0"
+                            title="Drag to reorder or drop onto a parent category"
+                          >
+                            <GripVertical className="h-4 w-4" />
+                          </span>
                           {cat.depth === 1 && (
                             <CornerDownRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                           )}
@@ -628,10 +838,25 @@ export function ManageView({
                                   {childCount} sub-{childCount === 1 ? "category" : "categories"}
                                 </Badge>
                               )}
+                              {usage.transactions > 0 && (
+                                <Badge variant="outline" className="text-[9px] py-0 font-mono text-muted-foreground">
+                                  {usage.transactions} {usage.transactions === 1 ? "tx" : "txs"}
+                                </Badge>
+                              )}
+                              {usage.rules > 0 && (
+                                <Badge variant="outline" className="text-[9px] py-0 font-mono text-muted-foreground">
+                                  {usage.rules} {usage.rules === 1 ? "rule" : "rules"}
+                                </Badge>
+                              )}
                               {cat.depth === 1 && cat.parentName && (
                                 <span className="text-[10px] text-muted-foreground">
                                   under {cat.parentName}
                                 </span>
+                              )}
+                              {dropPos === "inside" && (
+                                <Badge variant="info" className="text-[9px] py-0 font-mono">
+                                  Move under {cat.name}
+                                </Badge>
                               )}
                             </div>
                           </div>
@@ -689,14 +914,28 @@ export function ManageView({
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
 
+                          {sameTypeReplacementCount > 0 && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-muted-foreground hover:text-primary"
+                              title="Merge into another category"
+                              aria-label={`Merge ${cat.name}`}
+                              onClick={() => openRetireCategoryModal(cat, "merge")}
+                            >
+                              <GitMerge className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+
                           <Button
                             type="button"
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                            title="Delete category"
+                            title="Delete or merge category"
                             aria-label={`Delete ${cat.name}`}
-                            onClick={() => setDeleteCatTarget(cat)}
+                            onClick={() => openRetireCategoryModal(cat, "delete")}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
@@ -1012,39 +1251,154 @@ export function ManageView({
         </div>
       )}
 
-      {/* Delete Category Confirmation Modal */}
-      {deleteCatTarget && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 cc-animate-overlay">
-          <div className="bg-card border rounded-xl max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4 cc-animate-modal">
-            <h3 className="text-base font-bold">
-              Delete Category &ldquo;{deleteCatTarget.name}&rdquo;?
-            </h3>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Ledger entries using this category will remain intact and show as{" "}
-              <strong>Uncategorized</strong>. Any budget caps or rules targeting it will be removed, and any sub-categories under it will become top-level categories.
-            </p>
-            <div className="flex justify-end gap-2 pt-2 border-t">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setDeleteCatTarget(null)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                disabled={isPending}
-                onClick={handleConfirmDeleteCategory}
-              >
-                {isPending ? "Deleting..." : "Confirm Delete"}
-              </Button>
+      {/* Merge / Retire / Delete Category Confirmation Modal */}
+      {retireCatTarget && (() => {
+        const usage = data.usageByCategory?.[retireCatTarget.id] || {
+          transactions: 0,
+          rules: 0,
+          budgets: 0,
+        };
+        const childCount = childCountsByParent.get(retireCatTarget.id) || 0;
+        const replacementOptions = flattenedCategories.filter(
+          (c) => c.id !== retireCatTarget.id && c.type === retireCatTarget.type
+        );
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 cc-animate-overlay">
+            <div className="bg-card border rounded-xl max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4 cc-animate-modal">
+              <div className="flex items-start justify-between border-b pb-3 gap-2">
+                <div>
+                  <h3 className="text-base font-bold">
+                    {retireMode === "merge" ? "Merge &amp; Retire" : "Delete Category"}{" "}
+                    &ldquo;{retireCatTarget.name}&rdquo;
+                  </h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Currently used by {usage.transactions}{" "}
+                    {usage.transactions === 1 ? "transaction" : "transactions"},{" "}
+                    {usage.rules} {usage.rules === 1 ? "rule" : "rules"}, and{" "}
+                    {usage.budgets} budget {usage.budgets === 1 ? "cap" : "caps"}.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRetireCatTarget(null)}
+                  className="text-muted-foreground hover:text-foreground text-sm font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {retireModalError && (
+                <div className="p-3 rounded-lg border bg-destructive/10 border-destructive/30 text-destructive text-xs flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{retireModalError}</span>
+                </div>
+              )}
+
+              <div className="space-y-2.5">
+                <label
+                  className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs cursor-pointer transition-colors ${
+                    replacementOptions.length === 0
+                      ? "opacity-50 cursor-not-allowed"
+                      : retireMode === "merge"
+                      ? "border-primary bg-primary/5"
+                      : "hover:bg-muted/30"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="retire-mode"
+                    checked={retireMode === "merge"}
+                    disabled={replacementOptions.length === 0}
+                    onChange={() => setRetireMode("merge")}
+                    className="mt-0.5 accent-primary"
+                  />
+                  <div className="space-y-2 flex-1">
+                    <div>
+                      <span className="font-semibold block">
+                        Merge &amp; Reassign into Replacement Category
+                      </span>
+                      <span className="text-muted-foreground text-[11px] leading-relaxed block">
+                        Reassigns all ledger entries, classification rules, and subscriptions to the chosen replacement so historical charts stay consolidated.
+                        {childCount > 0
+                          ? ` Any sub-categories (${childCount}) stay nested cleanly.`
+                          : ""}
+                      </span>
+                    </div>
+                    {retireMode === "merge" && replacementOptions.length > 0 && (
+                      <select
+                        aria-label="Replacement category"
+                        value={replacementCatId}
+                        onChange={(e) => setReplacementCatId(e.target.value)}
+                        className={SELECT_CLS}
+                      >
+                        {replacementOptions.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs cursor-pointer transition-colors ${
+                    retireMode === "delete"
+                      ? "border-destructive/60 bg-destructive/5"
+                      : "hover:bg-muted/30"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="retire-mode"
+                    checked={retireMode === "delete"}
+                    onChange={() => setRetireMode("delete")}
+                    className="mt-0.5 accent-destructive"
+                  />
+                  <div>
+                    <span className="font-semibold block">
+                      Delete without Replacement
+                    </span>
+                    <span className="text-muted-foreground text-[11px] leading-relaxed block">
+                      Ledger entries remain intact as <strong>Uncategorized</strong>. Associated rules and budget caps are removed
+                      {childCount > 0
+                        ? `, and ${childCount} sub-${childCount === 1 ? "category" : "categories"} will become top-level.`
+                        : "."}
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRetireCatTarget(null)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  variant={retireMode === "merge" ? "default" : "destructive"}
+                  size="sm"
+                  disabled={isPending}
+                  onClick={handleConfirmRetireCategory}
+                >
+                  {isPending
+                    ? retireMode === "merge"
+                      ? "Merging..."
+                      : "Deleting..."
+                    : retireMode === "merge"
+                    ? "Confirm Merge"
+                    : "Confirm Delete"}
+                </Button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Create / Edit Account Modal */}
       {accModalMode && (

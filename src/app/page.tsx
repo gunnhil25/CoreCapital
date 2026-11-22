@@ -19,13 +19,17 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
-  DashboardCharts,
+  buildCategorySpendingHierarchy,
   CategoryDistributionPoint,
+  summarizeBudgetsHierarchy,
+} from "@/lib/category-utils";
+import {
+  DashboardCharts,
   MonthlyCashFlowChartPoint,
 } from "@/components/analytics/dashboard-charts";
 import { getPropertyGoalModelAction } from "@/actions/property-goals";
 import { getBudgetsAction } from "@/actions/budgets";
-import { getTransactionsAction } from "@/actions/transactions";
+import { getCategoriesAction, getTransactionsAction } from "@/actions/transactions";
 
 export const dynamic = "force-dynamic";
 
@@ -38,11 +42,12 @@ const HISTORICAL_BASELINE_MONTHS: MonthlyCashFlowChartPoint[] = [
 ];
 
 export default async function DashboardPage() {
-  const [{ hasGoal, goal, liveLiquidAccountSavings, baseCurrency, dhoas, fhss }, budgets, transactions] =
+  const [{ hasGoal, goal, liveLiquidAccountSavings, baseCurrency, dhoas, fhss }, budgets, transactions, categories] =
     await Promise.all([
       getPropertyGoalModelAction(),
       getBudgetsAction(),
       getTransactionsAction(),
+      getCategoriesAction(),
     ]);
 
   const progressPct =
@@ -50,10 +55,11 @@ export default async function DashboardPage() {
       ? Math.min(100, Math.round((goal.totalCapitalReady / goal.totalRequiredCash) * 100))
       : 0;
 
-  const totalBudgetLimit = budgets.reduce((sum, b) => sum + b.allocatedAmount, 0);
-  const totalBudgetSpent = budgets.reduce((sum, b) => sum + b.spentAmount, 0);
+  const budgetSummary = summarizeBudgetsHierarchy(budgets);
+  const totalBudgetLimit = budgetSummary.totalCap;
+  const totalBudgetSpent = budgetSummary.totalSpent;
   const budgetUtilizationPct =
-    totalBudgetLimit > 0 ? Math.round((totalBudgetSpent / totalBudgetLimit) * 100) : 0;
+    totalBudgetLimit > 0 ? budgetSummary.overallPct : 0;
 
   // Live inflow, outflow, and savings rate from posted non-reversal ledger records
   const activeTransactions = transactions.filter(
@@ -105,36 +111,12 @@ export default async function DashboardPage() {
           ...liveMonthlyPoints,
         ].slice(-6);
 
-  // Build spending distribution donut chart from budgets and non-budgeted ledger debits
-  const categoryTotals = new Map<string, CategoryDistributionPoint>();
-  const budgetedCategoryIds = new Set(budgets.map((b) => b.categoryId));
-
-  for (const b of budgets) {
-    if (b.spentAmount > 0) {
-      categoryTotals.set(b.categoryId, {
-        name: b.categoryName,
-        value: b.spentAmount,
-        color: b.categoryColor,
-      });
-    }
-  }
-
-  for (const tx of activeTransactions) {
-    for (const le of tx.ledgerEntries) {
-      if (le.entryType !== "debit") continue;
-      const catKey = le.categoryId || "uncategorized";
-      if (budgetedCategoryIds.has(catKey)) continue;
-      const prev = categoryTotals.get(catKey) || {
-        name: le.categoryName || "Uncategorized",
-        value: 0,
-        color: le.categoryColor || "#64748b",
-      };
-      prev.value = Math.round((prev.value + (parseFloat(le.amount) || 0)) * 100) / 100;
-      categoryTotals.set(catKey, prev);
-    }
-  }
-
-  const categoryData = Array.from(categoryTotals.values()).sort((a, b) => b.value - a.value);
+  // Build hierarchical spending distribution (top-level slices with drillable sub-categories)
+  const categoryData: CategoryDistributionPoint[] = buildCategorySpendingHierarchy(
+    categories,
+    budgets,
+    activeTransactions
+  );
   const recentTransactions = transactions.slice(0, 5);
 
   return (
@@ -421,11 +403,21 @@ export default async function DashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="p-5 pt-0 space-y-3.5">
-            {budgets.slice(0, 4).map((b) => (
+            {budgetSummary.groups.slice(0, 4).map(({ budget: b, subCaps, hasSubCapAlert }) => (
               <div key={b.id} className="space-y-1">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-medium truncate max-w-[140px]">{b.categoryName}</span>
-                  <span className="font-mono text-muted-foreground">
+                <div className="flex items-center justify-between text-xs gap-2">
+                  <span className="font-medium truncate max-w-[160px] flex items-center gap-1">
+                    <span className="truncate">{b.categoryName}</span>
+                    {subCaps.length > 0 && (
+                      <Badge
+                        variant={hasSubCapAlert ? "warning" : "outline"}
+                        className="text-[9px] px-1 py-0 font-mono shrink-0"
+                      >
+                        +{subCaps.length}
+                      </Badge>
+                    )}
+                  </span>
+                  <span className="font-mono text-muted-foreground shrink-0">
                     {formatCurrency(b.spentAmount)} / {formatCurrency(b.allocatedAmount)}
                   </span>
                 </div>

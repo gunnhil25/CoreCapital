@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import path from "path";
-import { desc, eq, asc, and, sql } from "drizzle-orm";
+import { desc, eq, asc, and, sql, inArray } from "drizzle-orm";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { db, checkDbConnection } from "@/db";
 import {
@@ -28,6 +28,7 @@ import {
   PropertyLocationCode,
 } from "./australian-finance";
 import { getSessionPayload, hashPassword } from "./auth";
+import { formatCategoryDisplayLabel } from "./category-utils";
 
 export const DEFAULT_USER_ID = "usr-00000000-0000-0000-0000-000000000000";
 
@@ -139,12 +140,21 @@ export interface BudgetItem {
   categoryId: string;
   categoryName: string;
   categoryColor: string;
+  parentCategoryId: string | null;
+  parentCategoryName: string | null;
+  alertThresholdPct: number;
   period: "monthly" | "weekly" | "yearly";
   allocatedAmount: number;
   spentAmount: number;
   remainingAmount: number;
   percentageSpent: number;
   status: "normal" | "warning" | "overrun";
+}
+
+export interface CategoryUsageCount {
+  transactions: number;
+  rules: number;
+  budgets: number;
 }
 
 export interface SubscriptionItem {
@@ -277,6 +287,7 @@ const inMemoryBudgetConfigs: Array<{
   categoryColor: string;
   period: "monthly" | "weekly" | "yearly";
   allocatedAmount: number;
+  alertThresholdPct: number;
   startDate: string;
 }> = [];
 const inMemorySubscriptions: SubscriptionItem[] = [];
@@ -523,6 +534,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
       categoryColor: cat2.color,
       period: "monthly" as const,
       allocatedAmount: 850.0,
+      alertThresholdPct: 80,
       startDate: "2026-10-01",
     },
     {
@@ -534,6 +546,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
       categoryColor: catMap.get("cat-3")!.color,
       period: "monthly" as const,
       allocatedAmount: 400.0,
+      alertThresholdPct: 80,
       startDate: "2026-10-01",
     },
     {
@@ -545,6 +558,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
       categoryColor: cat5.color,
       period: "monthly" as const,
       allocatedAmount: 350.0,
+      alertThresholdPct: 80,
       startDate: "2026-10-01",
     },
     {
@@ -556,6 +570,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
       categoryColor: cat6.color,
       period: "monthly" as const,
       allocatedAmount: 80.0,
+      alertThresholdPct: 80,
       startDate: "2026-10-01",
     },
     {
@@ -567,6 +582,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
       categoryColor: cat7.color,
       period: "monthly" as const,
       allocatedAmount: 250.0,
+      alertThresholdPct: 80,
       startDate: "2026-10-01",
     },
   ];
@@ -1046,6 +1062,7 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
           categoryId: toUuid(b.categoryId),
           period: b.period,
           amount: b.allocatedAmount.toFixed(2),
+          alertThresholdPct: b.alertThresholdPct,
           startDate: b.startDate,
         }))
       );
@@ -1239,6 +1256,11 @@ async function wipeDbUserWorkspace(userId: string): Promise<void> {
   await db.delete(auditLogs).where(eq(auditLogs.userId, dbUserId));
 }
 
+function clampBudgetThreshold(pct?: number): number {
+  if (pct === undefined || !Number.isFinite(pct)) return 80;
+  return Math.min(100, Math.max(10, Math.round(pct)));
+}
+
 function buildBudgetItem(
   cfg: {
     id: string;
@@ -1246,6 +1268,9 @@ function buildBudgetItem(
     categoryName: string;
     categorySlug: string;
     categoryColor: string;
+    parentCategoryId?: string | null;
+    parentCategoryName?: string | null;
+    alertThresholdPct?: number;
     period: "monthly" | "weekly" | "yearly";
     allocatedAmount: number;
     startDate: string;
@@ -1254,10 +1279,11 @@ function buildBudgetItem(
   matchingCategoryIds?: Set<string>
 ): BudgetItem {
   const baseline =
-    cfg.startDate === "2026-10-01"
+    cfg.startDate === "2026-10-01" && !cfg.parentCategoryId
       ? DEMO_BUDGET_BASELINES_BY_SLUG[cfg.categorySlug] ?? 0
       : 0;
   const matchSet = matchingCategoryIds || new Set([toUuid(cfg.categoryId)]);
+  const alertThresholdPct = clampBudgetThreshold(cfg.alertThresholdPct);
 
   let ledgerNet = 0;
   for (const tx of allTransactions) {
@@ -1285,7 +1311,7 @@ function buildBudgetItem(
   let status: "normal" | "warning" | "overrun" = "normal";
   if (percentageSpent > 100) {
     status = "overrun";
-  } else if (percentageSpent >= 80) {
+  } else if (percentageSpent >= alertThresholdPct) {
     status = "warning";
   }
 
@@ -1294,6 +1320,9 @@ function buildBudgetItem(
     categoryId: cfg.categoryId,
     categoryName: cfg.categoryName,
     categoryColor: cfg.categoryColor,
+    parentCategoryId: cfg.parentCategoryId ?? null,
+    parentCategoryName: cfg.parentCategoryName ?? null,
+    alertThresholdPct,
     period: cfg.period,
     allocatedAmount: cfg.allocatedAmount,
     spentAmount,
@@ -2216,6 +2245,132 @@ export const store = {
     }
   },
 
+  updateRule: async (
+    id: string,
+    input: {
+      name: string;
+      priority: number;
+      field: string;
+      matchType: string;
+      matchValue: string;
+      targetCategoryId: string;
+      isActive?: boolean;
+    },
+    explicitUserId?: string
+  ): Promise<RuleRecord | null> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const trimmedName = input.name.trim();
+    const trimmedVal = input.matchValue.trim();
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const [updated] = await db
+        .update(classificationRules)
+        .set({
+          name: trimmedName,
+          priority: input.priority || 100,
+          field: input.field,
+          matchType: input.matchType,
+          matchValue: trimmedVal,
+          targetCategoryId: toUuid(input.targetCategoryId),
+          ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(classificationRules.id, toUuid(id)),
+            eq(classificationRules.userId, dbUserId)
+          )
+        )
+        .returning();
+
+      if (!updated) return null;
+      return {
+        id: updated.id,
+        userId: updated.userId,
+        name: updated.name,
+        priority: updated.priority,
+        field: updated.field,
+        matchType: updated.matchType,
+        matchValue: updated.matchValue,
+        targetCategoryId: updated.targetCategoryId,
+        autoApply: updated.autoApply,
+        isActive: updated.isActive,
+        matchCount: updated.matchCount,
+      };
+    }
+
+    const rule = inMemoryRules.find((r) => r.id === id && r.userId === userId);
+    if (!rule) return null;
+
+    rule.name = trimmedName;
+    rule.priority = input.priority || 100;
+    rule.field = input.field;
+    rule.matchType = input.matchType;
+    rule.matchValue = trimmedVal;
+    rule.targetCategoryId = input.targetCategoryId;
+    if (input.isActive !== undefined) {
+      rule.isActive = input.isActive;
+    }
+
+    return { ...rule };
+  },
+
+  toggleRuleActive: async (
+    id: string,
+    isActive: boolean,
+    explicitUserId?: string
+  ): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return;
+
+    if (await isDbReady()) {
+      await db
+        .update(classificationRules)
+        .set({ isActive, updatedAt: new Date() })
+        .where(
+          and(
+            eq(classificationRules.id, toUuid(id)),
+            eq(classificationRules.userId, toUuid(userId))
+          )
+        );
+      return;
+    }
+
+    const rule = inMemoryRules.find((r) => r.id === id && r.userId === userId);
+    if (rule) {
+      rule.isActive = isActive;
+    }
+  },
+
+  deleteRule: async (id: string, explicitUserId?: string): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    if (await isDbReady()) {
+      await db
+        .delete(classificationRules)
+        .where(
+          and(
+            eq(classificationRules.id, toUuid(id)),
+            eq(classificationRules.userId, toUuid(userId))
+          )
+        );
+      return;
+    }
+
+    const idx = inMemoryRules.findIndex((r) => r.id === id && r.userId === userId);
+    if (idx !== -1) {
+      inMemoryRules.splice(idx, 1);
+    }
+  },
+
   addImportBatch: async (batch: ImportBatchItem): Promise<void> => {
     if (await isDbReady()) {
       await db.insert(importBatches).values({
@@ -2259,6 +2414,7 @@ export const store = {
 
       return budgetRows.map((b) => {
         const cat = catMap.get(b.categoryId);
+        const parent = cat?.parentId ? catMap.get(cat.parentId) : undefined;
         const matchSet = new Set<string>([
           toUuid(b.categoryId),
           ...(childrenByParent.get(b.categoryId) || []),
@@ -2270,6 +2426,9 @@ export const store = {
             categoryName: cat?.name || "Category",
             categorySlug: cat?.slug || "",
             categoryColor: cat?.color || "#0ea5e9",
+            parentCategoryId: parent ? parent.id : null,
+            parentCategoryName: parent ? parent.name : null,
+            alertThresholdPct: b.alertThresholdPct ?? 80,
             period: (b.period as "monthly" | "weekly" | "yearly") || "monthly",
             allocatedAmount: parseFloat(b.amount),
             startDate: b.startDate,
@@ -2295,14 +2454,25 @@ export const store = {
       .filter((cfg) => cfg.userId === userId)
       .map((cfg) => {
         const cat = catMap.get(cfg.categoryId);
+        const parent = cat?.parentId ? catMap.get(cat.parentId) : undefined;
         const matchSet = new Set<string>([
           toUuid(cfg.categoryId),
           ...(childrenByParent.get(cfg.categoryId) || []),
         ]);
         return buildBudgetItem(
           cat
-            ? { ...cfg, categoryName: cat.name, categoryColor: cat.color }
-            : cfg,
+            ? {
+                ...cfg,
+                categoryName: cat.name,
+                categoryColor: cat.color,
+                parentCategoryId: parent ? parent.id : null,
+                parentCategoryName: parent ? parent.name : null,
+              }
+            : {
+                ...cfg,
+                parentCategoryId: null,
+                parentCategoryName: null,
+              },
           allTransactions,
           matchSet
         );
@@ -2316,6 +2486,7 @@ export const store = {
       categoryColor?: string;
       allocatedAmount: number;
       period: "monthly" | "weekly" | "yearly";
+      alertThresholdPct?: number;
     },
     explicitUserId?: string
   ): Promise<BudgetItem> => {
@@ -2323,41 +2494,237 @@ export const store = {
     if (!userId) {
       throw new Error("Authentication required.");
     }
-    const id = crypto.randomUUID();
+
     const userCats = await store.getCategories(userId);
-    const cat = userCats.find((c) => c.id === input.categoryId);
+    const cat = userCats.find(
+      (c) => c.id === input.categoryId || toUuid(c.id) === toUuid(input.categoryId)
+    );
+    const resolvedCategoryId = cat?.id || input.categoryId;
+    const parent = cat?.parentId
+      ? userCats.find((c) => c.id === cat.parentId)
+      : undefined;
     const matchSet = new Set<string>([
-      toUuid(input.categoryId),
-      ...userCats.filter((c) => c.parentId === input.categoryId).map((c) => toUuid(c.id)),
+      toUuid(resolvedCategoryId),
+      ...userCats
+        .filter((c) => c.parentId === resolvedCategoryId)
+        .map((c) => toUuid(c.id)),
     ]);
+    const alertThresholdPct = clampBudgetThreshold(input.alertThresholdPct);
     const startDate = new Date().toISOString().split("T")[0];
-    const cfg = {
-      id,
-      userId,
-      categoryId: input.categoryId,
-      categoryName: cat?.name || input.categoryName,
-      categorySlug: cat?.slug || "",
-      categoryColor: cat?.color || input.categoryColor || "#0ea5e9",
-      period: input.period,
-      allocatedAmount: input.allocatedAmount,
-      startDate,
-    };
 
     if (await isDbReady()) {
-      await db.insert(budgets).values({
-        id,
-        userId: toUuid(userId),
-        categoryId: toUuid(input.categoryId),
-        period: input.period,
-        amount: input.allocatedAmount.toFixed(2),
-        startDate,
-      });
+      const dbUserId = toUuid(userId);
+      const dbCatId = toUuid(resolvedCategoryId);
+      const existingRows = await db
+        .select()
+        .from(budgets)
+        .where(and(eq(budgets.userId, dbUserId), eq(budgets.categoryId, dbCatId)))
+        .limit(1);
+
+      let budgetId: string;
+      let effectiveStartDate = startDate;
+      if (existingRows.length > 0) {
+        budgetId = existingRows[0].id;
+        effectiveStartDate = existingRows[0].startDate;
+        await db
+          .update(budgets)
+          .set({
+            period: input.period,
+            amount: input.allocatedAmount.toFixed(2),
+            alertThresholdPct,
+            updatedAt: new Date(),
+          })
+          .where(eq(budgets.id, budgetId));
+      } else {
+        budgetId = crypto.randomUUID();
+        await db.insert(budgets).values({
+          id: budgetId,
+          userId: dbUserId,
+          categoryId: dbCatId,
+          period: input.period,
+          amount: input.allocatedAmount.toFixed(2),
+          alertThresholdPct,
+          startDate,
+        });
+      }
+
+      const allTransactions = await store.getTransactions(undefined, userId);
+      return buildBudgetItem(
+        {
+          id: budgetId,
+          categoryId: resolvedCategoryId,
+          categoryName: cat?.name || input.categoryName,
+          categorySlug: cat?.slug || "",
+          categoryColor: cat?.color || input.categoryColor || "#0ea5e9",
+          parentCategoryId: parent ? parent.id : null,
+          parentCategoryName: parent ? parent.name : null,
+          alertThresholdPct,
+          period: input.period,
+          allocatedAmount: input.allocatedAmount,
+          startDate: effectiveStartDate,
+        },
+        allTransactions,
+        matchSet
+      );
+    }
+
+    const existingCfg = inMemoryBudgetConfigs.find(
+      (cfg) =>
+        cfg.userId === userId &&
+        (cfg.categoryId === resolvedCategoryId ||
+          toUuid(cfg.categoryId) === toUuid(resolvedCategoryId))
+    );
+
+    let cfg: (typeof inMemoryBudgetConfigs)[number];
+    if (existingCfg) {
+      existingCfg.categoryName = cat?.name || input.categoryName;
+      existingCfg.categorySlug = cat?.slug || existingCfg.categorySlug;
+      existingCfg.categoryColor =
+        cat?.color || input.categoryColor || existingCfg.categoryColor;
+      existingCfg.period = input.period;
+      existingCfg.allocatedAmount = input.allocatedAmount;
+      existingCfg.alertThresholdPct = alertThresholdPct;
+      cfg = existingCfg;
     } else {
+      cfg = {
+        id: crypto.randomUUID(),
+        userId,
+        categoryId: resolvedCategoryId,
+        categoryName: cat?.name || input.categoryName,
+        categorySlug: cat?.slug || "",
+        categoryColor: cat?.color || input.categoryColor || "#0ea5e9",
+        period: input.period,
+        allocatedAmount: input.allocatedAmount,
+        alertThresholdPct,
+        startDate,
+      };
       inMemoryBudgetConfigs.push(cfg);
     }
 
     const allTransactions = await store.getTransactions(undefined, userId);
-    return buildBudgetItem(cfg, allTransactions, matchSet);
+    return buildBudgetItem(
+      {
+        ...cfg,
+        parentCategoryId: parent ? parent.id : null,
+        parentCategoryName: parent ? parent.name : null,
+      },
+      allTransactions,
+      matchSet
+    );
+  },
+
+  updateBudget: async (
+    id: string,
+    input: {
+      allocatedAmount: number;
+      period: "monthly" | "weekly" | "yearly";
+      alertThresholdPct?: number;
+    },
+    explicitUserId?: string
+  ): Promise<BudgetItem | null> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const userCats = await store.getCategories(userId);
+    const alertThresholdPct = clampBudgetThreshold(input.alertThresholdPct);
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const [updated] = await db
+        .update(budgets)
+        .set({
+          amount: input.allocatedAmount.toFixed(2),
+          period: input.period,
+          alertThresholdPct,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(budgets.id, toUuid(id)), eq(budgets.userId, dbUserId)))
+        .returning();
+
+      if (!updated) return null;
+
+      const cat = userCats.find((c) => toUuid(c.id) === toUuid(updated.categoryId));
+      const parent = cat?.parentId
+        ? userCats.find((c) => c.id === cat.parentId)
+        : undefined;
+      const matchSet = new Set<string>([
+        toUuid(updated.categoryId),
+        ...userCats
+          .filter((c) => c.parentId && toUuid(c.parentId) === toUuid(updated.categoryId))
+          .map((c) => toUuid(c.id)),
+      ]);
+      const allTransactions = await store.getTransactions(undefined, userId);
+
+      return buildBudgetItem(
+        {
+          id: updated.id,
+          categoryId: updated.categoryId,
+          categoryName: cat?.name || "Category",
+          categorySlug: cat?.slug || "",
+          categoryColor: cat?.color || "#0ea5e9",
+          parentCategoryId: parent ? parent.id : null,
+          parentCategoryName: parent ? parent.name : null,
+          alertThresholdPct: updated.alertThresholdPct ?? alertThresholdPct,
+          period: (updated.period as "monthly" | "weekly" | "yearly") || "monthly",
+          allocatedAmount: parseFloat(updated.amount),
+          startDate: updated.startDate,
+        },
+        allTransactions,
+        matchSet
+      );
+    }
+
+    const cfg = inMemoryBudgetConfigs.find((b) => b.id === id && b.userId === userId);
+    if (!cfg) return null;
+
+    cfg.allocatedAmount = input.allocatedAmount;
+    cfg.period = input.period;
+    cfg.alertThresholdPct = alertThresholdPct;
+
+    const cat = userCats.find((c) => c.id === cfg.categoryId);
+    const parent = cat?.parentId
+      ? userCats.find((c) => c.id === cat.parentId)
+      : undefined;
+    const matchSet = new Set<string>([
+      toUuid(cfg.categoryId),
+      ...userCats
+        .filter((c) => c.parentId === cfg.categoryId)
+        .map((c) => toUuid(c.id)),
+    ]);
+    const allTransactions = await store.getTransactions(undefined, userId);
+
+    return buildBudgetItem(
+      {
+        ...cfg,
+        categoryName: cat?.name || cfg.categoryName,
+        categoryColor: cat?.color || cfg.categoryColor,
+        parentCategoryId: parent ? parent.id : null,
+        parentCategoryName: parent ? parent.name : null,
+      },
+      allTransactions,
+      matchSet
+    );
+  },
+
+  deleteBudget: async (id: string, explicitUserId?: string): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    if (await isDbReady()) {
+      await db
+        .delete(budgets)
+        .where(and(eq(budgets.id, toUuid(id)), eq(budgets.userId, toUuid(userId))));
+      return;
+    }
+
+    const idx = inMemoryBudgetConfigs.findIndex((b) => b.id === id && b.userId === userId);
+    if (idx !== -1) {
+      inMemoryBudgetConfigs.splice(idx, 1);
+    }
   },
 
   getSubscriptions: async (explicitUserId?: string): Promise<SubscriptionItem[]> => {
@@ -3122,6 +3489,479 @@ export const store = {
     }
 
     const orderMap = new Map(orderedIds.map((catId, idx) => [catId, idx * 10]));
+    for (const c of inMemoryCategories) {
+      if (c.userId === userId && orderMap.has(c.id)) {
+        c.sortOrder = orderMap.get(c.id)!;
+      }
+    }
+  },
+
+  getCategoryUsageCounts: async (
+    explicitUserId?: string
+  ): Promise<Record<string, CategoryUsageCount>> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return {};
+
+    const counts: Record<string, CategoryUsageCount> = {};
+    const ensure = (catId: string) => {
+      if (!counts[catId]) {
+        counts[catId] = { transactions: 0, rules: 0, budgets: 0 };
+      }
+      return counts[catId];
+    };
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const [txEntryRows, ruleRows, budgetRows] = await Promise.all([
+        db
+          .select({
+            categoryId: ledgerEntries.categoryId,
+            transactionId: ledgerEntries.transactionId,
+          })
+          .from(ledgerEntries)
+          .innerJoin(transactions, eq(ledgerEntries.transactionId, transactions.id))
+          .where(
+            and(
+              eq(transactions.userId, dbUserId),
+              eq(transactions.status, "posted"),
+              eq(transactions.isReversal, false)
+            )
+          ),
+        db
+          .select({ targetCategoryId: classificationRules.targetCategoryId })
+          .from(classificationRules)
+          .where(eq(classificationRules.userId, dbUserId)),
+        db
+          .select({ categoryId: budgets.categoryId })
+          .from(budgets)
+          .where(eq(budgets.userId, dbUserId)),
+      ]);
+
+      const txSetByCat = new Map<string, Set<string>>();
+      for (const row of txEntryRows) {
+        if (!row.categoryId) continue;
+        let set = txSetByCat.get(row.categoryId);
+        if (!set) {
+          set = new Set<string>();
+          txSetByCat.set(row.categoryId, set);
+        }
+        set.add(row.transactionId);
+      }
+      for (const [catId, set] of txSetByCat.entries()) {
+        ensure(catId).transactions = set.size;
+      }
+      for (const r of ruleRows) {
+        ensure(r.targetCategoryId).rules += 1;
+      }
+      for (const b of budgetRows) {
+        ensure(b.categoryId).budgets += 1;
+      }
+      return counts;
+    }
+
+    const txSetByCat = new Map<string, Set<string>>();
+    for (const tx of inMemoryTransactions) {
+      if (tx.userId !== userId || tx.status !== "posted" || tx.isReversal) continue;
+      for (const le of tx.ledgerEntries) {
+        if (!le.categoryId) continue;
+        let set = txSetByCat.get(le.categoryId);
+        if (!set) {
+          set = new Set<string>();
+          txSetByCat.set(le.categoryId, set);
+        }
+        set.add(tx.id);
+      }
+    }
+    for (const [catId, set] of txSetByCat.entries()) {
+      ensure(catId).transactions = set.size;
+    }
+    for (const r of inMemoryRules) {
+      if (r.userId === userId) {
+        ensure(r.targetCategoryId).rules += 1;
+      }
+    }
+    for (const b of inMemoryBudgetConfigs) {
+      if (b.userId === userId) {
+        ensure(b.categoryId).budgets += 1;
+      }
+    }
+
+    return counts;
+  },
+
+  mergeCategory: async (
+    sourceId: string,
+    targetId: string,
+    explicitUserId?: string
+  ): Promise<{
+    reassignedEntries: number;
+    reassignedRules: number;
+    reassignedSubscriptions: number;
+    movedSubcategories: number;
+  }> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+    if (!sourceId || !targetId || sourceId === targetId || toUuid(sourceId) === toUuid(targetId)) {
+      throw new Error("Cannot merge a category into itself.");
+    }
+
+    const userCats = await store.getCategories(userId);
+    const source = userCats.find(
+      (c) => c.id === sourceId || toUuid(c.id) === toUuid(sourceId)
+    );
+    const target = userCats.find(
+      (c) => c.id === targetId || toUuid(c.id) === toUuid(targetId)
+    );
+    if (!source || !target) {
+      throw new Error("Both source and replacement categories must exist.");
+    }
+    if (source.type !== target.type) {
+      throw new Error("Categories can only be merged with another category of the same type.");
+    }
+
+    const targetWasChildOfSource =
+      Boolean(target.parentId) && toUuid(target.parentId!) === toUuid(source.id);
+    const childrenOfSource = userCats.filter(
+      (c) => c.parentId && toUuid(c.parentId) === toUuid(source.id) && toUuid(c.id) !== toUuid(target.id)
+    );
+    const nextParentForChildren: string | null = targetWasChildOfSource
+      ? target.id
+      : target.parentId
+      ? target.parentId
+      : target.id;
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const dbSourceId = toUuid(source.id);
+      const dbTargetId = toUuid(target.id);
+
+      const summary = await db.transaction(async (trx) => {
+        const userTxRows = await trx
+          .select({ id: transactions.id })
+          .from(transactions)
+          .where(eq(transactions.userId, dbUserId));
+        const userTxIds = userTxRows.map((t) => t.id);
+
+        let reassignedEntries = 0;
+        if (userTxIds.length > 0) {
+          const updatedEntries = await trx
+            .update(ledgerEntries)
+            .set({ categoryId: dbTargetId })
+            .where(
+              and(
+                eq(ledgerEntries.categoryId, dbSourceId),
+                inArray(ledgerEntries.transactionId, userTxIds)
+              )
+            )
+            .returning({ id: ledgerEntries.id });
+          reassignedEntries = updatedEntries.length;
+        }
+
+        const updatedRules = await trx
+          .update(classificationRules)
+          .set({ targetCategoryId: dbTargetId, updatedAt: new Date() })
+          .where(
+            and(
+              eq(classificationRules.userId, dbUserId),
+              eq(classificationRules.targetCategoryId, dbSourceId)
+            )
+          )
+          .returning({ id: classificationRules.id });
+
+        const updatedSubs = await trx
+          .update(subscriptions)
+          .set({ categoryId: dbTargetId, updatedAt: new Date() })
+          .where(
+            and(
+              eq(subscriptions.userId, dbUserId),
+              eq(subscriptions.categoryId, dbSourceId)
+            )
+          )
+          .returning({ id: subscriptions.id });
+
+        const relatedBudgets = await trx
+          .select()
+          .from(budgets)
+          .where(
+            and(
+              eq(budgets.userId, dbUserId),
+              inArray(budgets.categoryId, [dbSourceId, dbTargetId])
+            )
+          );
+        const targetBudget = relatedBudgets.find((b) => b.categoryId === dbTargetId);
+        const sourceBudget = relatedBudgets.find((b) => b.categoryId === dbSourceId);
+        if (sourceBudget) {
+          if (targetBudget) {
+            await trx.delete(budgets).where(eq(budgets.id, sourceBudget.id));
+          } else {
+            await trx
+              .update(budgets)
+              .set({ categoryId: dbTargetId, updatedAt: new Date() })
+              .where(eq(budgets.id, sourceBudget.id));
+          }
+        }
+
+        if (targetWasChildOfSource) {
+          await trx
+            .update(categories)
+            .set({ parentId: null, updatedAt: new Date() })
+            .where(and(eq(categories.id, dbTargetId), eq(categories.userId, dbUserId)));
+        }
+
+        let movedSubcategories = 0;
+        if (childrenOfSource.length > 0 && nextParentForChildren) {
+          const updatedChildren = await trx
+            .update(categories)
+            .set({
+              parentId: toUuid(nextParentForChildren),
+              type: target.type,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(categories.userId, dbUserId),
+                eq(categories.parentId, dbSourceId),
+                inArray(
+                  categories.id,
+                  childrenOfSource.map((c) => toUuid(c.id))
+                )
+              )
+            )
+            .returning({ id: categories.id });
+          movedSubcategories = updatedChildren.length;
+        }
+
+        await trx
+          .delete(categories)
+          .where(and(eq(categories.id, dbSourceId), eq(categories.userId, dbUserId)));
+
+        await trx.insert(auditLogs).values({
+          id: crypto.randomUUID(),
+          userId: dbUserId,
+          entityType: "category",
+          entityId: dbTargetId,
+          action: "MERGE",
+          previousState: { sourceCategoryId: source.id, sourceCategoryName: source.name },
+          newState: { targetCategoryId: target.id, targetCategoryName: target.name },
+          reason: `Merged category "${source.name}" into "${target.name}"`,
+        });
+
+        return {
+          reassignedEntries,
+          reassignedRules: updatedRules.length,
+          reassignedSubscriptions: updatedSubs.length,
+          movedSubcategories,
+        };
+      });
+
+      return summary;
+    }
+
+    // In-memory parity path
+    const targetObj = inMemoryCategories.find(
+      (c) => c.userId === userId && c.id === target.id
+    )!;
+    if (targetWasChildOfSource) {
+      targetObj.parentId = null;
+    }
+
+    let movedSubcategories = 0;
+    for (const c of inMemoryCategories) {
+      if (
+        c.userId === userId &&
+        c.parentId === source.id &&
+        c.id !== target.id
+      ) {
+        c.parentId = nextParentForChildren;
+        c.type = target.type;
+        movedSubcategories += 1;
+      }
+    }
+
+    const userCatListAfterPromote = inMemoryCategories.filter((c) => c.userId === userId);
+    const targetDisplayName = formatCategoryDisplayLabel(
+      target.id,
+      userCatListAfterPromote
+    );
+
+    let reassignedEntries = 0;
+    for (const tx of inMemoryTransactions) {
+      if (tx.userId !== userId) continue;
+      for (const le of tx.ledgerEntries) {
+        if (le.categoryId === source.id) {
+          le.categoryId = target.id;
+          le.categoryName = targetDisplayName;
+          le.categoryColor = target.color;
+          reassignedEntries += 1;
+        }
+      }
+    }
+
+    let reassignedRules = 0;
+    for (const r of inMemoryRules) {
+      if (r.userId === userId && r.targetCategoryId === source.id) {
+        r.targetCategoryId = target.id;
+        reassignedRules += 1;
+      }
+    }
+
+    let reassignedSubscriptions = 0;
+    for (const s of inMemorySubscriptions) {
+      if (s.userId === userId && s.categoryId === source.id) {
+        s.categoryId = target.id;
+        s.categoryName = target.name;
+        s.categoryColor = target.color;
+        reassignedSubscriptions += 1;
+      }
+    }
+
+    const targetBudgetIdx = inMemoryBudgetConfigs.findIndex(
+      (b) => b.userId === userId && toUuid(b.categoryId) === toUuid(target.id)
+    );
+    const sourceBudgetIdx = inMemoryBudgetConfigs.findIndex(
+      (b) => b.userId === userId && toUuid(b.categoryId) === toUuid(source.id)
+    );
+    if (sourceBudgetIdx !== -1) {
+      if (targetBudgetIdx !== -1) {
+        inMemoryBudgetConfigs.splice(sourceBudgetIdx, 1);
+      } else {
+        const sb = inMemoryBudgetConfigs[sourceBudgetIdx];
+        sb.categoryId = target.id;
+        sb.categoryName = target.name;
+        sb.categorySlug = target.slug;
+        sb.categoryColor = target.color;
+      }
+    }
+
+    const srcIdx = inMemoryCategories.findIndex(
+      (c) => c.userId === userId && c.id === source.id
+    );
+    if (srcIdx !== -1) {
+      inMemoryCategories.splice(srcIdx, 1);
+    }
+
+    inMemoryAuditLogs.unshift({
+      id: crypto.randomUUID(),
+      userId,
+      entityType: "category",
+      entityId: target.id,
+      action: "MERGE",
+      reason: `Merged category "${source.name}" into "${target.name}"`,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      reassignedEntries,
+      reassignedRules,
+      reassignedSubscriptions,
+      movedSubcategories,
+    };
+  },
+
+  moveCategoryAndReorder: async (
+    params: {
+      categoryId: string;
+      targetParentId?: string | null;
+      orderedIds: string[];
+    },
+    explicitUserId?: string
+  ): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const userCats = await store.getCategories(userId);
+    const cat = userCats.find(
+      (c) => c.id === params.categoryId || toUuid(c.id) === toUuid(params.categoryId)
+    );
+    if (!cat) {
+      throw new Error("Category not found.");
+    }
+
+    if (params.targetParentId !== undefined && params.targetParentId !== null) {
+      if (
+        params.targetParentId === cat.id ||
+        toUuid(params.targetParentId) === toUuid(cat.id)
+      ) {
+        throw new Error("A category cannot be its own parent.");
+      }
+      const hasChildren = userCats.some(
+        (c) => c.parentId && toUuid(c.parentId) === toUuid(cat.id)
+      );
+      if (hasChildren) {
+        throw new Error(
+          "Cannot nest a category that already contains sub-categories."
+        );
+      }
+      const parent = userCats.find(
+        (c) =>
+          c.id === params.targetParentId ||
+          toUuid(c.id) === toUuid(params.targetParentId!)
+      );
+      if (!parent) {
+        throw new Error("Target parent category was not found.");
+      }
+      if (parent.parentId) {
+        throw new Error(
+          "Sub-categories can only be nested 2 levels deep under a top-level category."
+        );
+      }
+      if (parent.type !== cat.type) {
+        throw new Error(
+          "Sub-category must belong to a parent category of the same type."
+        );
+      }
+    }
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const dbCatId = toUuid(cat.id);
+      await db.transaction(async (trx) => {
+        if (params.targetParentId !== undefined) {
+          await trx
+            .update(categories)
+            .set({
+              parentId: params.targetParentId ? toUuid(params.targetParentId) : null,
+              updatedAt: new Date(),
+            })
+            .where(and(eq(categories.id, dbCatId), eq(categories.userId, dbUserId)));
+        }
+
+        for (let idx = 0; idx < params.orderedIds.length; idx++) {
+          await trx
+            .update(categories)
+            .set({ sortOrder: idx * 10, updatedAt: new Date() })
+            .where(
+              and(
+                eq(categories.id, toUuid(params.orderedIds[idx])),
+                eq(categories.userId, dbUserId)
+              )
+            );
+        }
+      });
+      return;
+    }
+
+    if (params.targetParentId !== undefined) {
+      const targetObj = inMemoryCategories.find(
+        (c) => c.userId === userId && c.id === cat.id
+      );
+      if (targetObj) {
+        const resolvedParent = params.targetParentId
+          ? userCats.find(
+              (c) =>
+                c.id === params.targetParentId ||
+                toUuid(c.id) === toUuid(params.targetParentId!)
+            )
+          : null;
+        targetObj.parentId = resolvedParent ? resolvedParent.id : null;
+      }
+    }
+
+    const orderMap = new Map(params.orderedIds.map((catId, idx) => [catId, idx * 10]));
     for (const c of inMemoryCategories) {
       if (c.userId === userId && orderMap.has(c.id)) {
         c.sortOrder = orderMap.get(c.id)!;

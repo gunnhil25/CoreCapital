@@ -1,13 +1,19 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { AccountRecord, CategoryRecord, store } from "@/lib/store";
+import {
+  AccountRecord,
+  CategoryRecord,
+  CategoryUsageCount,
+  store,
+} from "@/lib/store";
 
 export interface ManageDataResponse {
   categories: CategoryRecord[];
   accounts: AccountRecord[];
   baseCurrency: string;
   txCountsByAccount: Record<string, number>;
+  usageByCategory: Record<string, CategoryUsageCount>;
 }
 
 const VALID_CATEGORY_TYPES = new Set(["expense", "income", "investment", "transfer"]);
@@ -33,10 +39,17 @@ function revalidateManagedPaths() {
 }
 
 export async function getManageDataAction(): Promise<ManageDataResponse> {
-  const [categories, accounts, txCountsByAccount, activeUserId] = await Promise.all([
+  const [
+    categories,
+    accounts,
+    txCountsByAccount,
+    usageByCategory,
+    activeUserId,
+  ] = await Promise.all([
     store.getCategories(),
     store.getAllAccounts(),
     store.getAccountTransactionCounts(),
+    store.getCategoryUsageCounts(),
     store.getVerifiedSessionUserId(),
   ]);
 
@@ -48,6 +61,7 @@ export async function getManageDataAction(): Promise<ManageDataResponse> {
     accounts,
     baseCurrency,
     txCountsByAccount,
+    usageByCategory,
   };
 }
 
@@ -187,12 +201,29 @@ export async function updateCategoryAction(input: {
   }
 }
 
-export async function deleteCategoryAction(id: string): Promise<{
+export async function deleteCategoryAction(
+  id: string,
+  replacementCategoryId?: string | null
+): Promise<{
   success: boolean;
   error?: string;
+  mergedSummary?: {
+    reassignedEntries: number;
+    reassignedRules: number;
+    reassignedSubscriptions: number;
+    movedSubcategories: number;
+  };
   data?: ManageDataResponse;
 }> {
   try {
+    const replacementId = replacementCategoryId?.trim();
+    if (replacementId) {
+      const mergedSummary = await store.mergeCategory(id, replacementId);
+      revalidateManagedPaths();
+      const data = await getManageDataAction();
+      return { success: true, mergedSummary, data };
+    }
+
     await store.deleteCategory(id);
     revalidateManagedPaths();
     const data = await getManageDataAction();
@@ -201,6 +232,40 @@ export async function deleteCategoryAction(id: string): Promise<{
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to delete category.",
+    };
+  }
+}
+
+export async function mergeCategoryAction(
+  sourceId: string,
+  targetId: string
+): Promise<{
+  success: boolean;
+  error?: string;
+  summary?: {
+    reassignedEntries: number;
+    reassignedRules: number;
+    reassignedSubscriptions: number;
+    movedSubcategories: number;
+  };
+  data?: ManageDataResponse;
+}> {
+  try {
+    if (!sourceId || !targetId) {
+      return {
+        success: false,
+        error: "Both source and replacement categories are required.",
+      };
+    }
+
+    const summary = await store.mergeCategory(sourceId, targetId);
+    revalidateManagedPaths();
+    const data = await getManageDataAction();
+    return { success: true, summary, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to merge category.",
     };
   }
 }
@@ -219,6 +284,28 @@ export async function reorderCategoriesAction(orderedIds: string[]): Promise<{
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to reorder categories.",
+    };
+  }
+}
+
+export async function moveCategoryOrderAction(input: {
+  categoryId: string;
+  targetParentId?: string | null;
+  orderedIds: string[];
+}): Promise<{
+  success: boolean;
+  error?: string;
+  data?: ManageDataResponse;
+}> {
+  try {
+    await store.moveCategoryAndReorder(input);
+    revalidateManagedPaths();
+    const data = await getManageDataAction();
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to move category.",
     };
   }
 }

@@ -57,20 +57,41 @@ import {
   getTransactionsAction,
   getTransactionsPageDataAction,
 } from "@/actions/transactions";
-import { createBudgetAction, getBudgetsAction } from "@/actions/budgets";
+import {
+  createBudgetAction,
+  deleteBudgetAction,
+  getBudgetsAction,
+  getSpendingAnomaliesAction,
+  updateBudgetAction,
+} from "@/actions/budgets";
 import { getSubscriptionsAction } from "@/actions/subscriptions";
+import {
+  createClassificationRuleAction,
+  deleteClassificationRuleAction,
+  getClassificationRulesAction,
+  runClassificationRulesAction,
+  toggleClassificationRuleAction,
+  updateClassificationRuleAction,
+} from "@/actions/rules";
 import {
   getManageDataAction,
   createCategoryAction,
   updateCategoryAction,
   deleteCategoryAction,
+  mergeCategoryAction,
+  moveCategoryOrderAction,
   reorderCategoriesAction,
   createAccountAction,
   updateAccountAction,
   toggleAccountActiveAction,
   deleteAccountAction,
 } from "@/actions/manage";
-import { sortAndFlattenCategories } from "@/lib/category-utils";
+import {
+  buildCategorySpendingHierarchy,
+  computeCategoryDragResult,
+  sortAndFlattenCategories,
+  summarizeBudgetsHierarchy,
+} from "@/lib/category-utils";
 import {
   getAuthStatusAction,
   setupInitialAdminAction,
@@ -1360,6 +1381,466 @@ describe("Accounts & Categories Management, Sub-Categories & Ordering", () => {
     const delUsed = await deleteAccountAction(accounts[0].id);
     expect(delUsed.success).toBe(false);
     expect(delUsed.error).toContain("Archive");
+
+    setTestSession(undefined);
+  });
+});
+
+describe("Sub-Category Enhancements: Drilldown Charts, Nested Budget Sub-Caps, Rules & Merge, Drag-and-Drop", () => {
+  it("builds drilldown spending hierarchy with General parent bucket and zero double-counting", () => {
+    const cats = [
+      { id: "p-food", name: "Food", type: "expense", parentId: null, color: "#6d5dfc", sortOrder: 0 },
+      { id: "c-groc", name: "Groceries", type: "expense", parentId: "p-food", color: "#27c6a5", sortOrder: 10 },
+      { id: "c-coffee", name: "Coffee", type: "expense", parentId: "p-food", color: "#f59e0b", sortOrder: 20 },
+      { id: "p-trans", name: "Transport", type: "expense", parentId: null, color: "#0ea5e9", sortOrder: 30 },
+    ];
+
+    // Budgets exist on BOTH parent Food ($370 spent across parent+sub) and sub-cap Coffee ($45)
+    const budgets = [
+      { categoryId: "p-food", parentCategoryId: null, spentAmount: 370 },
+      { categoryId: "c-coffee", parentCategoryId: "p-food", spentAmount: 45 },
+    ];
+
+    const txs = [
+      {
+        status: "posted",
+        isReversal: false,
+        ledgerEntries: [
+          { categoryId: "c-groc", entryType: "debit", amount: "205.00" },
+          { categoryId: "c-coffee", entryType: "debit", amount: "45.00" },
+          { categoryId: "p-food", entryType: "debit", amount: "120.00" },
+          { categoryId: "p-trans", entryType: "debit", amount: "80.00" },
+        ],
+      },
+      // Reversed / reversal transactions should be excluded
+      {
+        status: "reversed",
+        isReversal: false,
+        ledgerEntries: [{ categoryId: "c-coffee", entryType: "debit", amount: "999.00" }],
+      },
+    ];
+
+    const hierarchy = buildCategorySpendingHierarchy(cats, budgets, txs);
+    expect(hierarchy).toHaveLength(2);
+
+    const foodSlice = hierarchy.find((s) => s.id === "p-food")!;
+    expect(foodSlice.value).toBeCloseTo(370, 2); // 205 + 45 + 120 (zero double-count)
+    expect(foodSlice.children).toHaveLength(3);
+    const childSum = foodSlice.children!.reduce((s, c) => s + c.value, 0);
+    expect(childSum).toBeCloseTo(foodSlice.value, 2);
+    expect(foodSlice.children!.some((c) => c.name === "Groceries" && c.value === 205)).toBe(true);
+    expect(foodSlice.children!.some((c) => c.name === "Coffee" && c.value === 45)).toBe(true);
+    expect(foodSlice.children!.some((c) => c.name === "General Food" && c.value === 120 && c.isDirectParentSpend)).toBe(true);
+
+    const transSlice = hierarchy.find((s) => s.id === "p-trans")!;
+    expect(transSlice.value).toBe(80);
+    expect(transSlice.children).toBeUndefined();
+
+    // Historical baseline preservation on top-level budget without duplicating child txs
+    const withBaseline = buildCategorySpendingHierarchy(
+      cats,
+      [{ categoryId: "p-food", parentCategoryId: null, spentAmount: 500 }],
+      txs
+    );
+    const foodWithBase = withBaseline.find((s) => s.id === "p-food")!;
+    expect(foodWithBase.value).toBe(500);
+    expect(foodWithBase.children!.find((c) => c.isDirectParentSpend)?.value).toBe(250); // 120 direct + 130 baseline
+  });
+
+  it("supports nested budget sub-caps without double-counting totals, custom alert thresholds, upsert/edit/delete, and anomaly attribution", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    await setupInitialAdminAction({
+      name: "Budget SubCap Tester",
+      email: "subcaps@corecapital.local",
+      password: "SubCapsPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+
+    const accounts = await getAccountsAction();
+    const foodParent = (await createCategoryAction({ name: "Food", type: "expense", color: "#6d5dfc" })).category!;
+    const takeawaySub = (await createCategoryAction({ name: "Takeaway", type: "expense", color: "#f59e0b", parentId: foodParent.id })).category!;
+    const groceriesSub = (await createCategoryAction({ name: "Groceries", type: "expense", color: "#27c6a5", parentId: foodParent.id })).category!;
+    const hobbyParent = (await createCategoryAction({ name: "Hobbies", type: "expense", color: "#0ea5e9" })).category!;
+    const photographySub = (await createCategoryAction({ name: "Photography", type: "expense", color: "#8b5cf6", parentId: hobbyParent.id })).category!;
+
+    // Parent Food $800; soft sub-caps Takeaway $200 (alert >=75%) and Groceries $700 ($900 > $800 parent cap)
+    await createBudgetAction({
+      categoryId: foodParent.id,
+      categoryName: foodParent.name,
+      allocatedAmount: 800,
+      period: "monthly",
+      alertThresholdPct: 80,
+    });
+    const takeawayCapRes = await createBudgetAction({
+      categoryId: takeawaySub.id,
+      categoryName: takeawaySub.name,
+      allocatedAmount: 200,
+      period: "monthly",
+      alertThresholdPct: 75,
+    });
+    await createBudgetAction({
+      categoryId: groceriesSub.id,
+      categoryName: groceriesSub.name,
+      allocatedAmount: 700,
+      period: "monthly",
+    });
+    // Standalone sub-category cap on Photography (Hobbies has NO parent cap)
+    await createBudgetAction({
+      categoryId: photographySub.id,
+      categoryName: photographySub.name,
+      allocatedAmount: 150,
+      period: "monthly",
+    });
+
+    // Upsert check: creating again for Takeaway updates instead of duplicating
+    const upsertTakeaway = await createBudgetAction({
+      categoryId: takeawaySub.id,
+      categoryName: takeawaySub.name,
+      allocatedAmount: 200,
+      period: "monthly",
+      alertThresholdPct: 75,
+    });
+    expect(upsertTakeaway.budgets).toHaveLength(4);
+    expect(upsertTakeaway.budget?.id).toBe(takeawayCapRes.budget?.id);
+
+    // Spend $160 on Takeaway (80% of $200 >= 75% threshold -> warning; 20% of Food $800 -> normal)
+    await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -160,
+      cleanDescription: "Thai Takeaway Dinner",
+      merchant: "Thai Place",
+      categoryId: takeawaySub.id,
+    });
+
+    const budgets = await getBudgetsAction();
+    const summary = summarizeBudgetsHierarchy(budgets);
+
+    // totalCap = Food ($800) + standalone Photography ($150) = $950 (not $1,850)
+    expect(summary.totalCap).toBeCloseTo(950, 2);
+    // totalSpent = Food ($160 rolled up) + Photography ($0) = $160 (not $320)
+    expect(summary.totalSpent).toBeCloseTo(160, 2);
+
+    const foodGroup = summary.groups.find((g) => g.budget.categoryId === foodParent.id)!;
+    expect(foodGroup.subCaps).toHaveLength(2);
+    expect(foodGroup.exceedsParentCap).toBe(true); // $200 + $700 = $900 > $800
+    expect(foodGroup.hasSubCapAlert).toBe(true);
+    expect(foodGroup.budget.status).toBe("normal");
+    expect(foodGroup.subCaps.find((s) => s.categoryId === takeawaySub.id)?.status).toBe("warning");
+
+    const photoGroup = summary.groups.find((g) => g.budget.categoryId === photographySub.id)!;
+    expect(photoGroup.isStandaloneSubCategory).toBe(true);
+
+    const anomaliesWarning = await getSpendingAnomaliesAction();
+    expect(
+      anomaliesWarning.some(
+        (a) => a.categoryName === "Food › Takeaway" && a.severity === "medium" && a.anomalyType.includes("75%")
+      )
+    ).toBe(true);
+
+    // Overspend via Groceries sub-category -> parent Food overruns and anomaly surfaces matching sub-category tx
+    await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -680,
+      cleanDescription: "Big Supermarket Run",
+      merchant: "Woolworths",
+      categoryId: groceriesSub.id,
+    });
+
+    const anomaliesOverrun = await getSpendingAnomaliesAction();
+    const foodOverrunAnom = anomaliesOverrun.find(
+      (a) => a.categoryName === "Food" && a.severity === "high"
+    );
+    expect(foodOverrunAnom).toBeDefined();
+    expect(foodOverrunAnom?.merchant).toBe("Woolworths");
+
+    // Edit & delete budget cap
+    const updatedCap = await updateBudgetAction({
+      id: takeawayCapRes.budget!.id,
+      allocatedAmount: 250,
+      period: "monthly",
+      alertThresholdPct: 90,
+    });
+    expect(updatedCap.success).toBe(true);
+    expect(updatedCap.budget?.allocatedAmount).toBe(250);
+    expect(updatedCap.budget?.status).toBe("normal");
+
+    const delCap = await deleteBudgetAction(photographySub.id ? photoGroup.budget.id : "");
+    expect(delCap.success).toBe(true);
+    expect((await getBudgetsAction())).toHaveLength(3);
+
+    setTestSession(undefined);
+  });
+
+  it("evaluates sub-category rules on unclassified entries and refines parent-tagged entries without touching other trees", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    await setupInitialAdminAction({
+      name: "Rules SubCat Tester",
+      email: "subrules@corecapital.local",
+      password: "SubRulesPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+
+    const accounts = await getAccountsAction();
+    const foodParent = (await createCategoryAction({ name: "Food", type: "expense", color: "#6d5dfc" })).category!;
+    const coffeeSub = (await createCategoryAction({ name: "Coffee", type: "expense", color: "#f59e0b", parentId: foodParent.id })).category!;
+    const transportParent = (await createCategoryAction({ name: "Transport", type: "expense", color: "#0ea5e9" })).category!;
+
+    const parentRuleRes = await createClassificationRuleAction({
+      name: "Broad Cafe Fallback",
+      priority: 50,
+      field: "description",
+      matchType: "contains",
+      matchValue: "cafe",
+      targetCategoryId: foodParent.id,
+    });
+    const subRuleRes = await createClassificationRuleAction({
+      name: "Campos Specialty Coffee",
+      priority: 20,
+      field: "description",
+      matchType: "contains",
+      matchValue: "campos",
+      targetCategoryId: coffeeSub.id,
+    });
+    expect(parentRuleRes.success).toBe(true);
+    expect(subRuleRes.success).toBe(true);
+
+    // 1. Unclassified "Campos Espresso" -> direct match to Food › Coffee
+    const txUnclassified = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -6.5,
+      cleanDescription: "Campos Espresso",
+    });
+    // 2. Broadly parent-tagged "Campos Roasters" under Food -> refined to Food › Coffee
+    const txBroadFood = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -22.0,
+      cleanDescription: "Campos Roasters Beans",
+      categoryId: foodParent.id,
+    });
+    // 3. Unrelated Transport entry containing "campos" -> must stay Transport
+    const txOtherTree = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -18.0,
+      cleanDescription: "Campos Station Parking",
+      categoryId: transportParent.id,
+    });
+
+    const runUnclassified = await runClassificationRulesAction("unclassified");
+    expect(runUnclassified.success).toBe(true);
+    expect(runUnclassified.matchedCount).toBe(1);
+
+    const runRefine = await runClassificationRulesAction("refine_parents");
+    expect(runRefine.success).toBe(true);
+    expect(runRefine.matchedCount).toBe(1);
+
+    const txsAfter = await getTransactionsAction();
+    expect(
+      txsAfter.find((t) => t.id === txUnclassified.transaction!.id)?.ledgerEntries[0].categoryId
+    ).toBe(coffeeSub.id);
+    expect(
+      txsAfter.find((t) => t.id === txBroadFood.transaction!.id)?.ledgerEntries[0].categoryName
+    ).toBe("Food › Coffee");
+    expect(
+      txsAfter.find((t) => t.id === txOtherTree.transaction!.id)?.ledgerEntries[0].categoryId
+    ).toBe(transportParent.id);
+
+    // Edit rule & pause rule -> paused rule must not match new transactions
+    const updRule = await updateClassificationRuleAction({
+      id: subRuleRes.rule!.id,
+      name: "Campos & Specialty Beans",
+      priority: 15,
+      field: "description",
+      matchType: "contains",
+      matchValue: "campos",
+      targetCategoryId: coffeeSub.id,
+    });
+    expect(updRule.success).toBe(true);
+    expect(updRule.rule?.priority).toBe(15);
+
+    await toggleClassificationRuleAction(subRuleRes.rule!.id, false);
+    const txWhilePaused = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -5.5,
+      cleanDescription: "Campos Oat Flat White",
+    });
+    await runClassificationRulesAction("unclassified");
+    const txsPausedCheck = await getTransactionsAction();
+    expect(
+      txsPausedCheck.find((t) => t.id === txWhilePaused.transaction!.id)?.ledgerEntries[0].categoryId
+    ).toBeNull();
+
+    // Delete rule
+    await deleteClassificationRuleAction(parentRuleRes.rule!.id);
+    const remainingRules = await getClassificationRulesAction();
+    expect(remainingRules.some((r) => r.id === parentRuleRes.rule!.id)).toBe(false);
+
+    setTestSession(undefined);
+  });
+
+  it("merges retired categories into replacements cleanly across transactions, rules, budgets, sub-categories, and audit logs", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    await setupInitialAdminAction({
+      name: "Merge Tester",
+      email: "merge@corecapital.local",
+      password: "MergePassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+
+    const accounts = await getAccountsAction();
+    const cats = await getCategoriesAction();
+    const foodParent = (await createCategoryAction({ name: "Food", type: "expense", color: "#6d5dfc" })).category!;
+    const oldCoffee = (await createCategoryAction({ name: "Old Coffee", type: "expense", color: "#f59e0b", parentId: foodParent.id })).category!;
+    const diningOut = (await createCategoryAction({ name: "Dining Out", type: "expense", color: "#ec4899" })).category!;
+    const salaryIncome = cats.find((c) => c.type === "income")!;
+
+    // Reject self-merge and cross-type merge
+    const selfMerge = await mergeCategoryAction(oldCoffee.id, oldCoffee.id);
+    expect(selfMerge.success).toBe(false);
+    const crossTypeMerge = await mergeCategoryAction(oldCoffee.id, salaryIncome.id);
+    expect(crossTypeMerge.success).toBe(false);
+
+    // Attach tx, rule, and budget caps to BOTH Old Coffee and Dining Out
+    const coffeeTx = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -14.5,
+      cleanDescription: "Old Coffee Roastery",
+      categoryId: oldCoffee.id,
+    });
+    const coffeeRule = await createClassificationRuleAction({
+      name: "Roastery Rule",
+      priority: 10,
+      field: "description",
+      matchType: "contains",
+      matchValue: "roastery",
+      targetCategoryId: oldCoffee.id,
+    });
+    await createBudgetAction({
+      categoryId: oldCoffee.id,
+      categoryName: oldCoffee.name,
+      allocatedAmount: 100,
+      period: "monthly",
+    });
+    await createBudgetAction({
+      categoryId: diningOut.id,
+      categoryName: diningOut.name,
+      allocatedAmount: 400,
+      period: "monthly",
+    });
+
+    const usageBefore = (await getManageDataAction()).usageByCategory[oldCoffee.id];
+    expect(usageBefore.transactions).toBe(1);
+    expect(usageBefore.rules).toBe(1);
+    expect(usageBefore.budgets).toBe(1);
+
+    // Retire-with-replacement into Dining Out
+    const mergeRes = await deleteCategoryAction(oldCoffee.id, diningOut.id);
+    expect(mergeRes.success).toBe(true);
+    expect(mergeRes.mergedSummary?.reassignedEntries).toBe(1);
+    expect(mergeRes.mergedSummary?.reassignedRules).toBe(1);
+
+    const pageAfter = await getTransactionsPageDataAction();
+    expect(
+      pageAfter.transactions.find((t) => t.id === coffeeTx.transaction!.id)?.ledgerEntries[0].categoryId
+    ).toBe(diningOut.id);
+    expect(
+      pageAfter.auditLogs.some((l) => l.action === "MERGE" && l.entityId === diningOut.id)
+    ).toBe(true);
+
+    const rulesAfter = await getClassificationRulesAction();
+    expect(rulesAfter.find((r) => r.id === coffeeRule.rule!.id)?.targetCategoryId).toBe(diningOut.id);
+
+    const budgetsAfter = await getBudgetsAction();
+    const diningBudgets = budgetsAfter.filter((b) => b.categoryId === diningOut.id);
+    expect(diningBudgets).toHaveLength(1);
+    expect(diningBudgets[0].allocatedAmount).toBe(400);
+    expect(diningBudgets[0].spentAmount).toBeCloseTo(14.5, 2);
+
+    // Merging a parent category into its own child promotes child and keeps siblings 2-level valid
+    const siblingSub = (await createCategoryAction({ name: "Bakery", type: "expense", color: "#27c6a5", parentId: foodParent.id })).category!;
+    const secondSub = (await createCategoryAction({ name: "Deli", type: "expense", color: "#0ea5e9", parentId: foodParent.id })).category!;
+    const parentIntoChild = await mergeCategoryAction(foodParent.id, siblingSub.id);
+    expect(parentIntoChild.success).toBe(true);
+    const catsAfterParentMerge = await getCategoriesAction();
+    const promotedBakery = catsAfterParentMerge.find((c) => c.id === siblingSub.id)!;
+    const movedDeli = catsAfterParentMerge.find((c) => c.id === secondSub.id)!;
+    expect(promotedBakery.parentId).toBeNull();
+    expect(movedDeli.parentId).toBe(promotedBakery.id);
+
+    setTestSession(undefined);
+  });
+
+  it("computes and persists drag-and-drop category reordering and same-type reparenting safely", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    await setupInitialAdminAction({
+      name: "DragDrop Tester",
+      email: "dragdrop@corecapital.local",
+      password: "DragDropPassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+
+    const food = (await createCategoryAction({ name: "Food", type: "expense", color: "#6d5dfc" })).category!;
+    const coffee = (await createCategoryAction({ name: "Coffee", type: "expense", color: "#f59e0b", parentId: food.id })).category!;
+    const snacks = (await createCategoryAction({ name: "Snacks", type: "expense", color: "#27c6a5", parentId: food.id })).category!;
+    const dining = (await createCategoryAction({ name: "Dining", type: "expense", color: "#ec4899" })).category!;
+    const salary = (await createCategoryAction({ name: "Bonus Income", type: "income", color: "#10b981" })).category!;
+
+    const allCats = await getCategoriesAction();
+
+    // 1. Reorder sub-categories within Food: Snacks before Coffee
+    const subReorder = computeCategoryDragResult(allCats, snacks.id, coffee.id, "before");
+    expect(subReorder.changed).toBe(true);
+    expect(subReorder.parentChanged).toBe(false);
+    expect(subReorder.orderedIds).toHaveLength(allCats.length);
+    expect(subReorder.orderedIds.indexOf(snacks.id)).toBeLessThan(
+      subReorder.orderedIds.indexOf(coffee.id)
+    );
+
+    // 2. Reject cross-type reparenting (dropping expense child onto income parent)
+    const crossTypeDrop = computeCategoryDragResult(allCats, snacks.id, salary.id, "inside");
+    expect(crossTypeDrop.changed).toBe(false);
+
+    // 3. Reject nesting a parent that has existing children
+    const nestParentWithChildren = computeCategoryDragResult(allCats, food.id, dining.id, "inside");
+    expect(nestParentWithChildren.changed).toBe(false);
+
+    // 4. Reparent Coffee inside Dining and persist atomically via moveCategoryOrderAction
+    const reparent = computeCategoryDragResult(allCats, coffee.id, dining.id, "inside");
+    expect(reparent.changed).toBe(true);
+    expect(reparent.parentChanged).toBe(true);
+    expect(reparent.nextParentId).toBe(dining.id);
+
+    const moveRes = await moveCategoryOrderAction({
+      categoryId: coffee.id,
+      targetParentId: reparent.nextParentId,
+      orderedIds: reparent.orderedIds,
+    });
+    expect(moveRes.success).toBe(true);
+    const updatedCats = await getCategoriesAction();
+    expect(updatedCats.find((c) => c.id === coffee.id)?.parentId).toBe(dining.id);
+
+    // 5. Reject direct server call to nest across types
+    const invalidServerMove = await moveCategoryOrderAction({
+      categoryId: coffee.id,
+      targetParentId: salary.id,
+      orderedIds: updatedCats.map((c) => c.id),
+    });
+    expect(invalidServerMove.success).toBe(false);
+    expect(invalidServerMove.error).toContain("same type");
 
     setTestSession(undefined);
   });
