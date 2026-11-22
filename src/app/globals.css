@@ -86,3 +86,72 @@
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.4);
 }
+
+@keyframes cc-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cc-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes cc-tab-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cc-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.cc-animate-page {
+  animation: cc-fade-up 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.cc-animate-tab {
+  animation: cc-tab-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.cc-animate-modal {
+  animation: cc-pop-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.cc-animate-overlay {
+  animation: cc-overlay-in 0.18s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-animate-page,
+  .cc-animate-tab,
+  .cc-animate-modal,
+  .cc-animate-overlay,
+  [role="tabpanel"][data-state="active"] {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}

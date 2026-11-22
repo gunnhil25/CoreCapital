@@ -626,8 +626,8 @@ export function CashFlowView({ initialData }: CashFlowViewProps) {
 
       {/* Add Scheduled Item Modal */}
       {isAddModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-card border rounded-xl max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 cc-animate-overlay">
+          <div className="bg-card border rounded-xl max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4 cc-animate-modal">
             <div className="flex items-center justify-between border-b pb-3">
               <div>
                 <h3 className="text-base font-bold">Add Scheduled Cash Flow Item</h3>
