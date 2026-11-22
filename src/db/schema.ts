@@ -75,6 +75,7 @@ export const categories = pgTable(
     color: varchar("color", { length: 30 }).default("#0ea5e9").notNull(),
     icon: varchar("icon", { length: 50 }).default("Tag").notNull(),
     isSystem: boolean("is_system").default(false).notNull(),
+    sortOrder: integer("sort_order").default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

@@ -23,6 +23,7 @@ function revalidateAllWorkspacePaths() {
   revalidatePath("/");
   revalidatePath("/transactions");
   revalidatePath("/ingest");
+  revalidatePath("/accounts");
   revalidatePath("/budgets");
   revalidatePath("/subscriptions");
   revalidatePath("/cash-flow");

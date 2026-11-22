@@ -15,6 +15,13 @@
       "when": 1795315931385,
       "tag": "0001_absent_daimon_hellstrom",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795320717381,
+      "tag": "0002_gifted_speedball",
+      "breakpoints": true
     }
   ]
 }

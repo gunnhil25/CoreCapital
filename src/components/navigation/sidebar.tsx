@@ -15,6 +15,7 @@ import {
   Server,
   Sparkles,
   Settings,
+  WalletCards,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +29,7 @@ const navItems = [
       { name: "Dashboard", href: "/", icon: LayoutDashboard },
       { name: "Transactions & Ledger", href: "/transactions", icon: Receipt },
       { name: "Statements & Ingestion", href: "/ingest", icon: UploadCloud },
+      { name: "Accounts & Categories", href: "/accounts", icon: WalletCards },
     ],
   },
   {

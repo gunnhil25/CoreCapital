@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { sortAndFlattenCategories } from "@/lib/category-utils";
 import { BudgetItem, createBudgetAction } from "@/actions/budgets";
 
 interface BudgetsViewProps {
@@ -41,10 +42,17 @@ interface BudgetsViewProps {
     anomalyType: string;
     severity: "high" | "medium" | "low";
   }>;
-  categories: Array<{ id: string; name: string; color: string }>;
+  categories: Array<{
+    id: string;
+    name: string;
+    color: string;
+    parentId?: string | null;
+    sortOrder?: number;
+  }>;
 }
 
 export function BudgetsView({ initialBudgets, anomalies, categories }: BudgetsViewProps) {
+  const orderedCategories = sortAndFlattenCategories(categories);
   const [budgets, setBudgets] = useState(initialBudgets);
   const [activeTab, setActiveTab] = useState("budgets");
   const [isPending, startTransition] = useTransition();
@@ -371,11 +379,11 @@ export function BudgetsView({ initialBudgets, anomalies, categories }: BudgetsVi
                 <select
                   value={categoryId}
                   onChange={(e) => setCategoryId(e.target.value)}
-                  className="w-full h-9 rounded-lg border border-input bg-transparent px-3 text-xs"
+                  className="w-full h-9 rounded-lg border border-input bg-background text-foreground px-3 text-xs"
                 >
-                  {categories.map((c) => (
+                  {orderedCategories.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name}
+                      {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
                     </option>
                   ))}
                 </select>

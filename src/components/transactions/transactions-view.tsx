@@ -36,6 +36,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { sortAndFlattenCategories } from "@/lib/category-utils";
 import {
   createTransactionAction,
   editTransactionAction,
@@ -60,7 +61,14 @@ interface TransactionsViewProps {
   initialTransactions: TransactionWithLedger[];
   initialAuditLogs: AuditLogItem[];
   accounts: { id: string; name: string }[];
-  categories: { id: string; name: string; color: string; type: string }[];
+  categories: {
+    id: string;
+    name: string;
+    color: string;
+    type: string;
+    parentId?: string | null;
+    sortOrder?: number;
+  }[];
   baseCurrency?: string;
   initialOpenNewModal?: boolean;
   initialTab?: "transactions" | "ledger";
@@ -263,6 +271,23 @@ export function TransactionsView({
     router.refresh();
   };
 
+  // Ordered category hierarchy for dropdowns & parent-inclusive filter
+  const orderedCategories = useMemo(
+    () => sortAndFlattenCategories(categories),
+    [categories]
+  );
+
+  const selectedCategoryMatchSet = useMemo(() => {
+    if (selectedCategory === "all") return null;
+    const ids = new Set<string>([selectedCategory]);
+    for (const c of categories) {
+      if (c.parentId === selectedCategory) {
+        ids.add(c.id);
+      }
+    }
+    return ids;
+  }, [categories, selectedCategory]);
+
   // Active Transactions (never polluted with reversed originals or reversal entries)
   const activeTransactions = useMemo(
     () => transactionsList.filter((tx) => tx.status === "posted" && !tx.isReversal),
@@ -273,8 +298,10 @@ export function TransactionsView({
     const list = activeTransactions.filter((tx) => {
       if (selectedAccount !== "all" && tx.accountId !== selectedAccount) return false;
       if (
-        selectedCategory !== "all" &&
-        !tx.ledgerEntries.some((le) => le.categoryId === selectedCategory)
+        selectedCategoryMatchSet &&
+        !tx.ledgerEntries.some(
+          (le) => le.categoryId && selectedCategoryMatchSet.has(le.categoryId)
+        )
       ) {
         return false;
       }
@@ -337,7 +364,7 @@ export function TransactionsView({
   }, [
     activeTransactions,
     selectedAccount,
-    selectedCategory,
+    selectedCategoryMatchSet,
     selectedType,
     search,
     sortBy,
@@ -764,9 +791,9 @@ export function TransactionsView({
                   className={SELECT_CLS}
                 >
                   <option value="all">All Categories</option>
-                  {categories.map((cat) => (
+                  {orderedCategories.map((cat) => (
                     <option key={cat.id} value={cat.id}>
-                      {cat.name}
+                      {cat.depth === 1 ? `↳ ${cat.displayLabel}` : cat.name}
                     </option>
                   ))}
                 </select>
@@ -1540,9 +1567,9 @@ export function TransactionsView({
                     onChange={(e) => setCategoryId(e.target.value)}
                     className={SELECT_CLS}
                   >
-                    {categories.map((c) => (
+                    {orderedCategories.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.name}
+                        {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
                       </option>
                     ))}
                   </select>
@@ -1572,9 +1599,9 @@ export function TransactionsView({
                         }}
                         className="flex-1 h-8 rounded border border-input bg-background text-foreground px-2 text-xs"
                       >
-                        {categories.map((c) => (
+                        {orderedCategories.map((c) => (
                           <option key={c.id} value={c.id}>
-                            {c.name}
+                            {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
                           </option>
                         ))}
                       </select>

@@ -57,8 +57,20 @@ import {
   getTransactionsAction,
   getTransactionsPageDataAction,
 } from "@/actions/transactions";
-import { getBudgetsAction } from "@/actions/budgets";
+import { createBudgetAction, getBudgetsAction } from "@/actions/budgets";
 import { getSubscriptionsAction } from "@/actions/subscriptions";
+import {
+  getManageDataAction,
+  createCategoryAction,
+  updateCategoryAction,
+  deleteCategoryAction,
+  reorderCategoriesAction,
+  createAccountAction,
+  updateAccountAction,
+  toggleAccountActiveAction,
+  deleteAccountAction,
+} from "@/actions/manage";
+import { sortAndFlattenCategories } from "@/lib/category-utils";
 import {
   getAuthStatusAction,
   setupInitialAdminAction,
@@ -1197,6 +1209,157 @@ describe("Transactions Separation & Immutable Edit / Ledger Hash Audit", () => {
     });
     expect(editReversal.success).toBe(false);
     expect(editReversal.error).toContain("reversal");
+
+    setTestSession(undefined);
+  });
+});
+
+describe("Accounts & Categories Management, Sub-Categories & Ordering", () => {
+  it("supports category/sub-category CRUD, ordering, parent budget rollup, and account lifecycle", async () => {
+    await store.clearAllUsersForTest();
+    setTestSession(null);
+    const setupRes = await setupInitialAdminAction({
+      name: "Taxonomy Tester",
+      email: "manage@corecapital.local",
+      password: "ManagePassword123!",
+      baseCurrency: "AUD",
+      seedMode: "clean",
+    });
+    expect(setupRes.success).toBe(true);
+
+    // 1. Create parent expense & income categories + sub-category inheriting type
+    const parentRes = await createCategoryAction({
+      name: "Lifestyle",
+      type: "expense",
+      color: "#6d5dfc",
+    });
+    expect(parentRes.success).toBe(true);
+    const parentId = parentRes.category!.id;
+
+    const childRes = await createCategoryAction({
+      name: "Specialty Coffee",
+      type: "income", // Should inherit parent's "expense" type
+      color: "#27c6a5",
+      parentId,
+    });
+    expect(childRes.success).toBe(true);
+    expect(childRes.category?.type).toBe("expense");
+    expect(childRes.category?.parentId).toBe(parentId);
+
+    const incomeRes = await createCategoryAction({
+      name: "Consulting Income",
+      type: "income",
+      color: "#10b981",
+    });
+    expect(incomeRes.success).toBe(true);
+
+    // Reject 3rd-level nesting
+    const thirdLevel = await createCategoryAction({
+      name: "Pour Over",
+      type: "expense",
+      color: "#0ea5e9",
+      parentId: childRes.category!.id,
+    });
+    expect(thirdLevel.success).toBe(false);
+    expect(thirdLevel.error).toContain("2 levels");
+
+    // 2. Reorder categories so Consulting Income comes first
+    const allCatsBefore = await getCategoriesAction();
+    const reorderedIds = [
+      incomeRes.category!.id,
+      ...allCatsBefore.filter((c) => c.id !== incomeRes.category!.id).map((c) => c.id),
+    ];
+    const reorderRes = await reorderCategoriesAction(reorderedIds);
+    expect(reorderRes.success).toBe(true);
+    const allCatsAfter = await getCategoriesAction();
+    expect(allCatsAfter[0].id).toBe(incomeRes.category!.id);
+
+    const flattened = sortAndFlattenCategories(allCatsAfter);
+    const childNode = flattened.find((n) => n.id === childRes.category!.id)!;
+    expect(childNode.depth).toBe(1);
+    expect(childNode.displayLabel).toBe("Lifestyle › Specialty Coffee");
+
+    // 3. Parent budget cap rolls up sub-category spending
+    const budgetRes = await createBudgetAction({
+      categoryId: parentId,
+      categoryName: "Lifestyle",
+      allocatedAmount: 300,
+      period: "monthly",
+    });
+    expect(budgetRes.success).toBe(true);
+
+    const accounts = await getAccountsAction();
+    const txSubRes = await createTransactionAction({
+      accountId: accounts[0].id,
+      date: "2026-11-22",
+      amount: -45,
+      cleanDescription: "Morning Espresso",
+      categoryId: childRes.category!.id,
+    });
+    expect(txSubRes.success).toBe(true);
+
+    const budgets = await getBudgetsAction();
+    const lifestyleBudget = budgets.find((b) => b.categoryId === parentId)!;
+    expect(lifestyleBudget.spentAmount).toBeCloseTo(45, 2);
+
+    // 4. Deleting parent category promotes sub-category to top-level
+    const editChildRes = await updateCategoryAction({
+      id: childRes.category!.id,
+      name: "Coffee & Cafes",
+      type: "expense",
+      color: "#f59e0b",
+      parentId,
+    });
+    expect(editChildRes.success).toBe(true);
+
+    const delParentRes = await deleteCategoryAction(parentId);
+    expect(delParentRes.success).toBe(true);
+    const catsAfterDel = await getCategoriesAction();
+    const promotedChild = catsAfterDel.find((c) => c.id === childRes.category!.id)!;
+    expect(promotedChild.parentId).toBeNull();
+    expect(promotedChild.name).toBe("Coffee & Cafes");
+
+    // 5. Account CRUD, archive, and ledger delete protection
+    const newAccRes = await createAccountAction({
+      name: "Macquarie Offset",
+      institution: "Macquarie Bank",
+      accountType: "offset",
+      accountNumberLast4: "9012",
+      currency: "AUD",
+      currentBalance: 12000,
+      isOffsetAccount: true,
+      interestRatePct: 5.95,
+    });
+    expect(newAccRes.success).toBe(true);
+    const offsetId = newAccRes.account!.id;
+
+    const updAccRes = await updateAccountAction({
+      id: offsetId,
+      name: "Macquarie Main Offset",
+      institution: "Macquarie Bank",
+      accountType: "offset",
+      accountNumberLast4: "9012",
+      currency: "AUD",
+      currentBalance: 13500,
+      isOffsetAccount: true,
+      interestRatePct: 5.9,
+    });
+    expect(updAccRes.success).toBe(true);
+    expect(updAccRes.account?.currentBalance).toBe("13500.00");
+
+    // Archive hides from active getAccountsAction, keeps in getManageDataAction
+    await toggleAccountActiveAction(offsetId, false);
+    expect((await getAccountsAction()).some((a) => a.id === offsetId)).toBe(false);
+    expect((await getManageDataAction()).accounts.some((a) => a.id === offsetId)).toBe(true);
+
+    // Unused account deletes cleanly; account with transactions cannot be deleted
+    const delUnused = await deleteAccountAction(offsetId);
+    expect(delUnused.success).toBe(true);
+    expect((await getManageDataAction()).accounts.some((a) => a.id === offsetId)).toBe(false);
+
+    const delUsed = await deleteAccountAction(accounts[0].id);
+    expect(delUsed.success).toBe(false);
+    expect(delUsed.error).toContain("Archive");
 
     setTestSession(undefined);
   });

@@ -76,9 +76,11 @@ export interface CategoryRecord {
   userId: string;
   name: string;
   slug: string;
+  parentId: string | null;
   type: string;
   color: string;
   icon: string;
+  sortOrder: number;
 }
 
 export interface RuleRecord {
@@ -289,10 +291,19 @@ function formatLocalIsoDate(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+function slugifyCategoryName(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "category";
+}
+
 function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boolean) {
   const catMap = new Map<string, { id: string; name: string; slug: string; color: string }>();
 
-  const seededCategories: CategoryRecord[] = defaultCategories.map((c) => {
+  const seededCategories: CategoryRecord[] = defaultCategories.map((c, idx) => {
     const id = preserveLegacyTestIds ? c.id : crypto.randomUUID();
     catMap.set(c.id, { id, name: c.name, slug: c.slug, color: c.color });
     return {
@@ -300,9 +311,11 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
       userId,
       name: c.name,
       slug: c.slug,
+      parentId: null,
       type: c.type,
       color: c.color,
       icon: c.icon,
+      sortOrder: idx * 10,
     };
   });
 
@@ -740,7 +753,7 @@ function createDemoWorkspacePayload(userId: string, preserveLegacyTestIds: boole
 
 function createCleanWorkspacePayload(userId: string) {
   const catMap = new Map<string, string>();
-  const seededCategories: CategoryRecord[] = defaultCategories.map((c) => {
+  const seededCategories: CategoryRecord[] = defaultCategories.map((c, idx) => {
     const id = crypto.randomUUID();
     catMap.set(c.id, id);
     return {
@@ -748,9 +761,11 @@ function createCleanWorkspacePayload(userId: string) {
       userId,
       name: c.name,
       slug: c.slug,
+      parentId: null,
       type: c.type,
       color: c.color,
       icon: c.icon,
+      sortOrder: idx * 10,
     };
   });
 
@@ -888,6 +903,7 @@ async function ensureMigrated(): Promise<void> {
       await db.execute(sql`ALTER TABLE "property_goals" ADD COLUMN IF NOT EXISTS "dhoas_lump_sum_amount" numeric(12, 2) DEFAULT '0.00' NOT NULL`);
       await db.execute(sql`UPDATE "property_goals" SET "location_code" = 'VIC' WHERE "target_city" = 'Melbourne' AND "location_code" = 'SA'`);
       await db.execute(sql`UPDATE "property_goals" SET "target_date" = make_date("target_year", 7, 1) WHERE "target_year" <> 2029`);
+      await db.execute(sql`ALTER TABLE "categories" ADD COLUMN IF NOT EXISTS "sort_order" integer DEFAULT 0 NOT NULL`);
     }
     hasMigratedDb = true;
   })().finally(() => {
@@ -921,10 +937,12 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
           userId: dbUserId,
           name: c.name,
           slug: c.slug,
+          parentId: c.parentId ? toUuid(c.parentId) : null,
           type: c.type,
           color: c.color,
           icon: c.icon,
           isSystem: true,
+          sortOrder: c.sortOrder,
         }))
       );
     }
@@ -1141,10 +1159,12 @@ async function seedDbWorkspace(userId: string, seedMode: "clean" | "demo"): Prom
         userId: dbUserId,
         name: c.name,
         slug: c.slug,
+        parentId: c.parentId ? toUuid(c.parentId) : null,
         type: c.type,
         color: c.color,
         icon: c.icon,
         isSystem: true,
+        sortOrder: c.sortOrder,
       }))
     );
 
@@ -1230,18 +1250,20 @@ function buildBudgetItem(
     allocatedAmount: number;
     startDate: string;
   },
-  allTransactions: TransactionWithLedger[]
+  allTransactions: TransactionWithLedger[],
+  matchingCategoryIds?: Set<string>
 ): BudgetItem {
   const baseline =
     cfg.startDate === "2026-10-01"
       ? DEMO_BUDGET_BASELINES_BY_SLUG[cfg.categorySlug] ?? 0
       : 0;
+  const matchSet = matchingCategoryIds || new Set([toUuid(cfg.categoryId)]);
 
   let ledgerNet = 0;
   for (const tx of allTransactions) {
     for (const entry of tx.ledgerEntries) {
       const entryCatMatch =
-        entry.categoryId && toUuid(entry.categoryId) === toUuid(cfg.categoryId);
+        entry.categoryId && matchSet.has(toUuid(entry.categoryId));
       if (!entryCatMatch) continue;
 
       const amt = parseFloat(entry.amount) || 0;
@@ -1706,7 +1728,38 @@ export const store = {
       .map((a) => ({ ...a }));
   },
 
-  getCategories: async (explicitUserId?: string) => {
+  getAllAccounts: async (explicitUserId?: string): Promise<AccountRecord[]> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return [];
+    if (await isDbReady()) {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(eq(accounts.userId, toUuid(userId)))
+        .orderBy(desc(accounts.isActive), asc(accounts.name));
+      return rows.map((r) => ({
+        id: r.id,
+        userId: r.userId,
+        name: r.name,
+        institution: r.institution,
+        accountType: r.accountType,
+        accountNumberLast4: r.accountNumberLast4 || "",
+        currency: r.currency,
+        currentBalance: r.currentBalance,
+        isOffsetAccount: r.isOffsetAccount,
+        interestRatePct: r.interestRatePct || "0.00",
+        isActive: r.isActive,
+      }));
+    }
+    return inMemoryAccounts
+      .filter((a) => a.userId === userId)
+      .sort((a, b) =>
+        a.isActive !== b.isActive ? (a.isActive ? -1 : 1) : a.name.localeCompare(b.name)
+      )
+      .map((a) => ({ ...a }));
+  },
+
+  getCategories: async (explicitUserId?: string): Promise<CategoryRecord[]> => {
     const userId = await store.resolveActiveUserId(explicitUserId);
     if (!userId) return [];
     if (await isDbReady()) {
@@ -1714,19 +1767,22 @@ export const store = {
         .select()
         .from(categories)
         .where(eq(categories.userId, toUuid(userId)))
-        .orderBy(asc(categories.name));
+        .orderBy(asc(categories.sortOrder), asc(categories.name));
       return rows.map((c) => ({
         id: c.id,
         userId: c.userId || userId,
         name: c.name,
         slug: c.slug,
+        parentId: c.parentId ?? null,
         type: c.type,
         color: c.color,
         icon: c.icon,
+        sortOrder: c.sortOrder ?? 0,
       }));
     }
     return inMemoryCategories
       .filter((c) => c.userId === userId)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
       .map((c) => ({ ...c }));
   },
 
@@ -1837,13 +1893,19 @@ export const store = {
 
       for (const le of entryRows) {
         const cat = le.categoryId ? catMap.get(le.categoryId) : undefined;
+        const parent = cat?.parentId ? catMap.get(cat.parentId) : undefined;
+        const categoryDisplayName = cat
+          ? parent
+            ? `${parent.name} › ${cat.name}`
+            : cat.name
+          : "Uncategorized";
         const list = entryMap.get(le.transactionId) || [];
         list.push({
           id: le.id,
           transactionId: le.transactionId,
           accountId: le.accountId,
           categoryId: le.categoryId,
-          categoryName: cat?.name || "Uncategorized",
+          categoryName: categoryDisplayName,
           categoryColor: cat?.color || "#64748b",
           entryType: le.entryType as "debit" | "credit",
           amount: le.amount,
@@ -1882,7 +1944,24 @@ export const store = {
       return filterTransactions(mapped, filters);
     }
 
-    const userTx = inMemoryTransactions.filter((t) => t.userId === userId);
+    const memCatMap = new Map(
+      inMemoryCategories.filter((c) => c.userId === userId).map((c) => [c.id, c])
+    );
+    const userTx = inMemoryTransactions
+      .filter((t) => t.userId === userId)
+      .map((t) => ({
+        ...t,
+        ledgerEntries: t.ledgerEntries.map((le) => {
+          const cat = le.categoryId ? memCatMap.get(le.categoryId) : undefined;
+          if (!cat) return le;
+          const parent = cat.parentId ? memCatMap.get(cat.parentId) : undefined;
+          return {
+            ...le,
+            categoryName: parent ? `${parent.name} › ${cat.name}` : cat.name,
+            categoryColor: cat.color,
+          };
+        }),
+      }));
     return filterTransactions(userTx, filters);
   },
 
@@ -2169,9 +2248,21 @@ export const store = {
         db.select().from(categories).where(eq(categories.userId, dbUserId)),
       ]);
       const catMap = new Map(categoryRows.map((c) => [c.id, c]));
+      const childrenByParent = new Map<string, string[]>();
+      for (const c of categoryRows) {
+        if (c.parentId) {
+          const list = childrenByParent.get(c.parentId) || [];
+          list.push(toUuid(c.id));
+          childrenByParent.set(c.parentId, list);
+        }
+      }
 
       return budgetRows.map((b) => {
         const cat = catMap.get(b.categoryId);
+        const matchSet = new Set<string>([
+          toUuid(b.categoryId),
+          ...(childrenByParent.get(b.categoryId) || []),
+        ]);
         return buildBudgetItem(
           {
             id: b.id,
@@ -2183,14 +2274,39 @@ export const store = {
             allocatedAmount: parseFloat(b.amount),
             startDate: b.startDate,
           },
-          allTransactions
+          allTransactions,
+          matchSet
         );
       });
     }
 
+    const userCats = inMemoryCategories.filter((c) => c.userId === userId);
+    const catMap = new Map(userCats.map((c) => [c.id, c]));
+    const childrenByParent = new Map<string, string[]>();
+    for (const c of userCats) {
+      if (c.parentId) {
+        const list = childrenByParent.get(c.parentId) || [];
+        list.push(toUuid(c.id));
+        childrenByParent.set(c.parentId, list);
+      }
+    }
+
     return inMemoryBudgetConfigs
       .filter((cfg) => cfg.userId === userId)
-      .map((cfg) => buildBudgetItem(cfg, allTransactions));
+      .map((cfg) => {
+        const cat = catMap.get(cfg.categoryId);
+        const matchSet = new Set<string>([
+          toUuid(cfg.categoryId),
+          ...(childrenByParent.get(cfg.categoryId) || []),
+        ]);
+        return buildBudgetItem(
+          cat
+            ? { ...cfg, categoryName: cat.name, categoryColor: cat.color }
+            : cfg,
+          allTransactions,
+          matchSet
+        );
+      });
   },
 
   addBudget: async (
@@ -2208,7 +2324,12 @@ export const store = {
       throw new Error("Authentication required.");
     }
     const id = crypto.randomUUID();
-    const cat = (await store.getCategories(userId)).find((c) => c.id === input.categoryId);
+    const userCats = await store.getCategories(userId);
+    const cat = userCats.find((c) => c.id === input.categoryId);
+    const matchSet = new Set<string>([
+      toUuid(input.categoryId),
+      ...userCats.filter((c) => c.parentId === input.categoryId).map((c) => toUuid(c.id)),
+    ]);
     const startDate = new Date().toISOString().split("T")[0];
     const cfg = {
       id,
@@ -2236,7 +2357,7 @@ export const store = {
     }
 
     const allTransactions = await store.getTransactions(undefined, userId);
-    return buildBudgetItem(cfg, allTransactions);
+    return buildBudgetItem(cfg, allTransactions, matchSet);
   },
 
   getSubscriptions: async (explicitUserId?: string): Promise<SubscriptionItem[]> => {
@@ -2774,6 +2895,449 @@ export const store = {
     const idx = inMemoryCashFlowItems.findIndex((i) => i.id === id && i.userId === userId);
     if (idx !== -1) {
       inMemoryCashFlowItems.splice(idx, 1);
+    }
+  },
+
+  addCategory: async (
+    input: {
+      name: string;
+      type: string;
+      color: string;
+      icon?: string;
+      parentId?: string | null;
+      sortOrder?: number;
+    },
+    explicitUserId?: string
+  ): Promise<CategoryRecord> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const existing = await store.getCategories(userId);
+    const maxOrder = existing.reduce((max, c) => Math.max(max, c.sortOrder), -10);
+    const newCat: CategoryRecord = {
+      id: crypto.randomUUID(),
+      userId,
+      name: input.name.trim(),
+      slug: slugifyCategoryName(input.name),
+      parentId: input.parentId || null,
+      type: input.type,
+      color: input.color,
+      icon: input.icon || "Tag",
+      sortOrder: input.sortOrder ?? maxOrder + 10,
+    };
+
+    if (await isDbReady()) {
+      await db.insert(categories).values({
+        id: newCat.id,
+        userId: toUuid(userId),
+        name: newCat.name,
+        slug: newCat.slug,
+        parentId: newCat.parentId ? toUuid(newCat.parentId) : null,
+        type: newCat.type,
+        color: newCat.color,
+        icon: newCat.icon,
+        isSystem: false,
+        sortOrder: newCat.sortOrder,
+      });
+    } else {
+      inMemoryCategories.push(newCat);
+    }
+
+    return newCat;
+  },
+
+  updateCategory: async (
+    id: string,
+    input: {
+      name: string;
+      type: string;
+      color: string;
+      icon?: string;
+      parentId?: string | null;
+    },
+    explicitUserId?: string
+  ): Promise<CategoryRecord | null> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const trimmedName = input.name.trim();
+    const nextSlug = slugifyCategoryName(trimmedName);
+    const nextParentId = input.parentId || null;
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const dbCatId = toUuid(id);
+      const [updated] = await db
+        .update(categories)
+        .set({
+          name: trimmedName,
+          slug: nextSlug,
+          type: input.type,
+          color: input.color,
+          icon: input.icon || "Tag",
+          parentId: nextParentId ? toUuid(nextParentId) : null,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(categories.id, dbCatId), eq(categories.userId, dbUserId)))
+        .returning();
+
+      if (!updated) return null;
+
+      // Keep direct sub-categories' type aligned when editing a top-level category
+      if (!updated.parentId) {
+        await db
+          .update(categories)
+          .set({ type: updated.type, updatedAt: new Date() })
+          .where(and(eq(categories.parentId, dbCatId), eq(categories.userId, dbUserId)));
+      }
+
+      return {
+        id: updated.id,
+        userId: updated.userId || userId,
+        name: updated.name,
+        slug: updated.slug,
+        parentId: updated.parentId ?? null,
+        type: updated.type,
+        color: updated.color,
+        icon: updated.icon,
+        sortOrder: updated.sortOrder ?? 0,
+      };
+    }
+
+    const target = inMemoryCategories.find((c) => c.id === id && c.userId === userId);
+    if (!target) return null;
+
+    target.name = trimmedName;
+    target.slug = nextSlug;
+    target.type = input.type;
+    target.color = input.color;
+    target.icon = input.icon || target.icon || "Tag";
+    target.parentId = nextParentId;
+
+    if (!nextParentId) {
+      for (const child of inMemoryCategories) {
+        if (child.userId === userId && child.parentId === id) {
+          child.type = input.type;
+        }
+      }
+    }
+
+    for (const b of inMemoryBudgetConfigs) {
+      if (b.userId === userId && b.categoryId === id) {
+        b.categoryName = trimmedName;
+        b.categoryColor = input.color;
+      }
+    }
+
+    return { ...target };
+  },
+
+  deleteCategory: async (id: string, explicitUserId?: string): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      const dbCatId = toUuid(id);
+      await db.transaction(async (trx) => {
+        // Promote sub-categories to top-level before deleting parent
+        await trx
+          .update(categories)
+          .set({ parentId: null, updatedAt: new Date() })
+          .where(and(eq(categories.parentId, dbCatId), eq(categories.userId, dbUserId)));
+
+        await trx
+          .delete(categories)
+          .where(and(eq(categories.id, dbCatId), eq(categories.userId, dbUserId)));
+      });
+      return;
+    }
+
+    for (const c of inMemoryCategories) {
+      if (c.userId === userId && c.parentId === id) {
+        c.parentId = null;
+      }
+    }
+
+    const catIdx = inMemoryCategories.findIndex((c) => c.id === id && c.userId === userId);
+    if (catIdx !== -1) {
+      inMemoryCategories.splice(catIdx, 1);
+    }
+
+    for (const tx of inMemoryTransactions) {
+      if (tx.userId !== userId) continue;
+      for (const le of tx.ledgerEntries) {
+        if (le.categoryId === id) {
+          le.categoryId = null;
+          le.categoryName = "Uncategorized";
+          le.categoryColor = "#64748b";
+        }
+      }
+    }
+
+    for (let i = inMemoryBudgetConfigs.length - 1; i >= 0; i--) {
+      if (
+        inMemoryBudgetConfigs[i].userId === userId &&
+        inMemoryBudgetConfigs[i].categoryId === id
+      ) {
+        inMemoryBudgetConfigs.splice(i, 1);
+      }
+    }
+
+    for (let i = inMemoryRules.length - 1; i >= 0; i--) {
+      if (inMemoryRules[i].userId === userId && inMemoryRules[i].targetCategoryId === id) {
+        inMemoryRules.splice(i, 1);
+      }
+    }
+  },
+
+  reorderCategories: async (
+    orderedIds: string[],
+    explicitUserId?: string
+  ): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    if (await isDbReady()) {
+      const dbUserId = toUuid(userId);
+      await db.transaction(async (trx) => {
+        for (let idx = 0; idx < orderedIds.length; idx++) {
+          await trx
+            .update(categories)
+            .set({ sortOrder: idx * 10, updatedAt: new Date() })
+            .where(
+              and(eq(categories.id, toUuid(orderedIds[idx])), eq(categories.userId, dbUserId))
+            );
+        }
+      });
+      return;
+    }
+
+    const orderMap = new Map(orderedIds.map((catId, idx) => [catId, idx * 10]));
+    for (const c of inMemoryCategories) {
+      if (c.userId === userId && orderMap.has(c.id)) {
+        c.sortOrder = orderMap.get(c.id)!;
+      }
+    }
+  },
+
+  addAccount: async (
+    input: {
+      name: string;
+      institution: string;
+      accountType: string;
+      accountNumberLast4?: string;
+      currency: string;
+      currentBalance: number;
+      isOffsetAccount?: boolean;
+      interestRatePct?: number;
+    },
+    explicitUserId?: string
+  ): Promise<AccountRecord> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const newAcc: AccountRecord = {
+      id: crypto.randomUUID(),
+      userId,
+      name: input.name.trim(),
+      institution: input.institution.trim(),
+      accountType: input.accountType,
+      accountNumberLast4: (input.accountNumberLast4 || "").trim().slice(0, 4),
+      currency: (input.currency || "AUD").toUpperCase(),
+      currentBalance: (Math.round(input.currentBalance * 100) / 100).toFixed(2),
+      isOffsetAccount: Boolean(input.isOffsetAccount || input.accountType === "offset"),
+      interestRatePct: (Math.round((input.interestRatePct ?? 0) * 100) / 100).toFixed(2),
+      isActive: true,
+    };
+
+    if (await isDbReady()) {
+      await db.insert(accounts).values({
+        id: newAcc.id,
+        userId: toUuid(userId),
+        name: newAcc.name,
+        institution: newAcc.institution,
+        accountType: newAcc.accountType,
+        accountNumberLast4: newAcc.accountNumberLast4 || null,
+        currency: newAcc.currency,
+        currentBalance: newAcc.currentBalance,
+        isOffsetAccount: newAcc.isOffsetAccount,
+        interestRatePct: newAcc.interestRatePct,
+        isActive: true,
+      });
+    } else {
+      inMemoryAccounts.push(newAcc);
+    }
+
+    return newAcc;
+  },
+
+  updateAccount: async (
+    id: string,
+    input: {
+      name: string;
+      institution: string;
+      accountType: string;
+      accountNumberLast4?: string;
+      currency: string;
+      currentBalance: number;
+      isOffsetAccount?: boolean;
+      interestRatePct?: number;
+    },
+    explicitUserId?: string
+  ): Promise<AccountRecord | null> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const trimmedName = input.name.trim();
+    const trimmedInst = input.institution.trim();
+    const last4 = (input.accountNumberLast4 || "").trim().slice(0, 4);
+    const currency = (input.currency || "AUD").toUpperCase();
+    const balanceStr = (Math.round(input.currentBalance * 100) / 100).toFixed(2);
+    const isOffset = Boolean(input.isOffsetAccount || input.accountType === "offset");
+    const rateStr = (Math.round((input.interestRatePct ?? 0) * 100) / 100).toFixed(2);
+
+    if (await isDbReady()) {
+      const [updated] = await db
+        .update(accounts)
+        .set({
+          name: trimmedName,
+          institution: trimmedInst,
+          accountType: input.accountType,
+          accountNumberLast4: last4 || null,
+          currency,
+          currentBalance: balanceStr,
+          isOffsetAccount: isOffset,
+          interestRatePct: rateStr,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(accounts.id, toUuid(id)), eq(accounts.userId, toUuid(userId))))
+        .returning();
+
+      if (!updated) return null;
+      return {
+        id: updated.id,
+        userId: updated.userId,
+        name: updated.name,
+        institution: updated.institution,
+        accountType: updated.accountType,
+        accountNumberLast4: updated.accountNumberLast4 || "",
+        currency: updated.currency,
+        currentBalance: updated.currentBalance,
+        isOffsetAccount: updated.isOffsetAccount,
+        interestRatePct: updated.interestRatePct || "0.00",
+        isActive: updated.isActive,
+      };
+    }
+
+    const acc = inMemoryAccounts.find((a) => a.id === id && a.userId === userId);
+    if (!acc) return null;
+
+    acc.name = trimmedName;
+    acc.institution = trimmedInst;
+    acc.accountType = input.accountType;
+    acc.accountNumberLast4 = last4;
+    acc.currency = currency;
+    acc.currentBalance = balanceStr;
+    acc.isOffsetAccount = isOffset;
+    acc.interestRatePct = rateStr;
+
+    for (const tx of inMemoryTransactions) {
+      if (tx.userId === userId && tx.accountId === id) {
+        tx.accountName = trimmedName;
+      }
+    }
+
+    return { ...acc };
+  },
+
+  toggleAccountActive: async (
+    id: string,
+    isActive: boolean,
+    explicitUserId?: string
+  ): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return;
+
+    if (await isDbReady()) {
+      await db
+        .update(accounts)
+        .set({ isActive, updatedAt: new Date() })
+        .where(and(eq(accounts.id, toUuid(id)), eq(accounts.userId, toUuid(userId))));
+      return;
+    }
+
+    const acc = inMemoryAccounts.find((a) => a.id === id && a.userId === userId);
+    if (acc) {
+      acc.isActive = isActive;
+    }
+  },
+
+  getAccountTransactionCounts: async (
+    explicitUserId?: string
+  ): Promise<Record<string, number>> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) return {};
+
+    const counts: Record<string, number> = {};
+    if (await isDbReady()) {
+      const rows = await db
+        .select({
+          accountId: transactions.accountId,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(transactions)
+        .where(eq(transactions.userId, toUuid(userId)))
+        .groupBy(transactions.accountId);
+      for (const r of rows) {
+        counts[r.accountId] = r.count;
+      }
+      return counts;
+    }
+
+    for (const tx of inMemoryTransactions) {
+      if (tx.userId === userId) {
+        counts[tx.accountId] = (counts[tx.accountId] || 0) + 1;
+      }
+    }
+    return counts;
+  },
+
+  deleteAccount: async (id: string, explicitUserId?: string): Promise<void> => {
+    const userId = await store.resolveActiveUserId(explicitUserId);
+    if (!userId) {
+      throw new Error("Authentication required.");
+    }
+
+    const counts = await store.getAccountTransactionCounts(userId);
+    if ((counts[id] || counts[toUuid(id)] || 0) > 0) {
+      throw new Error(
+        "Cannot delete an account with ledger transactions. Archive the account instead to preserve ledger integrity."
+      );
+    }
+
+    if (await isDbReady()) {
+      await db
+        .delete(accounts)
+        .where(and(eq(accounts.id, toUuid(id)), eq(accounts.userId, toUuid(userId))));
+      return;
+    }
+
+    const idx = inMemoryAccounts.findIndex((a) => a.id === id && a.userId === userId);
+    if (idx !== -1) {
+      inMemoryAccounts.splice(idx, 1);
     }
   },
 };

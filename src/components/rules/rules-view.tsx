@@ -26,6 +26,7 @@ import {
   createClassificationRuleAction,
   runClassificationRulesOnUnclassifiedAction,
 } from "@/actions/rules";
+import { sortAndFlattenCategories } from "@/lib/category-utils";
 
 interface RulesViewProps {
   initialRules: Array<{
@@ -39,10 +40,17 @@ interface RulesViewProps {
     isActive: boolean;
     matchCount?: number;
   }>;
-  categories: Array<{ id: string; name: string; color: string }>;
+  categories: Array<{
+    id: string;
+    name: string;
+    color: string;
+    parentId?: string | null;
+    sortOrder?: number;
+  }>;
 }
 
 export function RulesView({ initialRules, categories }: RulesViewProps) {
+  const orderedCategories = sortAndFlattenCategories(categories);
   const [rules, setRules] = useState(initialRules);
   const [isPending, startTransition] = useTransition();
   const [isNewRuleOpen, setIsNewRuleOpen] = useState(false);
@@ -165,7 +173,7 @@ export function RulesView({ initialRules, categories }: RulesViewProps) {
               {rules
                 .sort((a, b) => a.priority - b.priority)
                 .map((rule) => {
-                  const targetCat = categories.find((c) => c.id === rule.targetCategoryId);
+                  const targetCat = orderedCategories.find((c) => c.id === rule.targetCategoryId);
                   return (
                     <TableRow key={rule.id}>
                       <TableCell className="font-mono text-xs font-bold text-sky-500">
@@ -193,7 +201,7 @@ export function RulesView({ initialRules, categories }: RulesViewProps) {
                             className="h-2 w-2 rounded-full inline-block"
                             style={{ backgroundColor: targetCat?.color || "#64748b" }}
                           />
-                          <span>{targetCat?.name || "Category"}</span>
+                          <span>{targetCat?.displayLabel || targetCat?.name || "Category"}</span>
                         </div>
                       </TableCell>
                       <TableCell className="text-center font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
@@ -303,11 +311,11 @@ export function RulesView({ initialRules, categories }: RulesViewProps) {
                 <select
                   value={targetCategoryId}
                   onChange={(e) => setTargetCategoryId(e.target.value)}
-                  className="w-full h-9 rounded-lg border border-input bg-transparent px-3 text-xs"
+                  className="w-full h-9 rounded-lg border border-input bg-background text-foreground px-3 text-xs"
                 >
-                  {categories.map((c) => (
+                  {orderedCategories.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name}
+                      {c.depth === 1 ? `↳ ${c.displayLabel}` : c.name}
                     </option>
                   ))}
                 </select>
