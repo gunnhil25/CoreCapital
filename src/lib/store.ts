@@ -1367,15 +1367,11 @@ function filterTransactions(
     );
   }
 
-  return list.sort((a, b) =>
-    a.date !== b.date
-      ? a.date < b.date
-        ? 1
-        : -1
-      : a.createdAt < b.createdAt
-      ? 1
-      : -1
-  );
+  return list.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
+    return 0;
+  });
 }
 
 function mapDbUser(u: typeof users.$inferSelect): UserRecord {

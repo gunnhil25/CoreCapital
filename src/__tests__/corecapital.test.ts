@@ -1543,7 +1543,7 @@ describe("Sub-Category Enhancements: Drilldown Charts, Nested Budget Sub-Caps, R
     // Overspend via Groceries sub-category -> parent Food overruns and anomaly surfaces matching sub-category tx
     await createTransactionAction({
       accountId: accounts[0].id,
-      date: "2026-11-22",
+      date: "2026-11-23",
       amount: -680,
       cleanDescription: "Big Supermarket Run",
       merchant: "Woolworths",
