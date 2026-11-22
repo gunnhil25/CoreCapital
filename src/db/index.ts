@@ -27,6 +27,10 @@ const FAILURE_CACHE_TTL_MS = 5_000;
  * so offline development or build phases seamlessly use the seeded fallback store.
  */
 export async function checkDbConnection(): Promise<boolean> {
+  if (process.env.CORECAPITAL_USE_IN_MEMORY === "true") {
+    return false;
+  }
+
   if (process.env.NODE_ENV === "test" && !process.env.TEST_DATABASE_URL) {
     return false;
   }

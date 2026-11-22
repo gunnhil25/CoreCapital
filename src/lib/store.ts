@@ -270,30 +270,69 @@ const DEMO_BUDGET_BASELINES_BY_SLUG: Record<string, number> = {
   transport: 295.4,
 };
 
-// In-memory state used as fallback when PostgreSQL is unavailable or in test mode
-const inMemoryUsers: UserRecord[] = [];
-const inMemoryAccounts: AccountRecord[] = [];
-const inMemoryCategories: CategoryRecord[] = [];
-const inMemoryRules: RuleRecord[] = [];
-const inMemoryTransactions: TransactionWithLedger[] = [];
-const inMemoryBatches: ImportBatchItem[] = [];
-const inMemoryAuditLogs: AuditLogItem[] = [];
-const inMemoryBudgetConfigs: Array<{
-  id: string;
-  userId: string;
-  categoryId: string;
-  categoryName: string;
-  categorySlug: string;
-  categoryColor: string;
-  period: "monthly" | "weekly" | "yearly";
-  allocatedAmount: number;
-  alertThresholdPct: number;
-  startDate: string;
-}> = [];
-const inMemorySubscriptions: SubscriptionItem[] = [];
-const inMemoryCashFlowItems: CashFlowScheduledItemRecord[] = [];
-const inMemoryGoalConfigs = new Map<string, PropertyGoalConfig>();
-const inMemoryFhssContributions: FhssContributionRecord[] = [];
+// In-memory state used as fallback when PostgreSQL is unavailable or in test/E2E mode.
+// Stored on globalThis so Next.js dev/standalone route chunks share one consistent workspace.
+interface InMemoryStoreState {
+  users: UserRecord[];
+  accounts: AccountRecord[];
+  categories: CategoryRecord[];
+  rules: RuleRecord[];
+  transactions: TransactionWithLedger[];
+  batches: ImportBatchItem[];
+  auditLogs: AuditLogItem[];
+  budgetConfigs: Array<{
+    id: string;
+    userId: string;
+    categoryId: string;
+    categoryName: string;
+    categorySlug: string;
+    categoryColor: string;
+    period: "monthly" | "weekly" | "yearly";
+    allocatedAmount: number;
+    alertThresholdPct: number;
+    startDate: string;
+  }>;
+  subscriptions: SubscriptionItem[];
+  cashFlowItems: CashFlowScheduledItemRecord[];
+  goalConfigs: Map<string, PropertyGoalConfig>;
+  fhssContributions: FhssContributionRecord[];
+  initializedForTest: boolean;
+}
+
+const globalForStore = globalThis as typeof globalThis & {
+  __coreCapitalInMemoryStore?: InMemoryStoreState;
+};
+
+const memStore: InMemoryStoreState =
+  globalForStore.__coreCapitalInMemoryStore ??
+  (globalForStore.__coreCapitalInMemoryStore = {
+    users: [],
+    accounts: [],
+    categories: [],
+    rules: [],
+    transactions: [],
+    batches: [],
+    auditLogs: [],
+    budgetConfigs: [],
+    subscriptions: [],
+    cashFlowItems: [],
+    goalConfigs: new Map<string, PropertyGoalConfig>(),
+    fhssContributions: [],
+    initializedForTest: false,
+  });
+
+const inMemoryUsers = memStore.users;
+const inMemoryAccounts = memStore.accounts;
+const inMemoryCategories = memStore.categories;
+const inMemoryRules = memStore.rules;
+const inMemoryTransactions = memStore.transactions;
+const inMemoryBatches = memStore.batches;
+const inMemoryAuditLogs = memStore.auditLogs;
+const inMemoryBudgetConfigs = memStore.budgetConfigs;
+const inMemorySubscriptions = memStore.subscriptions;
+const inMemoryCashFlowItems = memStore.cashFlowItems;
+const inMemoryGoalConfigs = memStore.goalConfigs;
+const inMemoryFhssContributions = memStore.fhssContributions;
 
 function formatLocalIsoDate(date: Date): string {
   const y = date.getFullYear();
@@ -858,7 +897,8 @@ function seedInMemoryWorkspace(
 
 // Initialize a default admin + demo workspace ONLY during automated test runs so
 // existing ledger unit tests start ready, while dev/docker instances launch /setup.
-if (process.env.NODE_ENV === "test") {
+if (process.env.NODE_ENV === "test" && !memStore.initializedForTest) {
+  memStore.initializedForTest = true;
   const nowIso = new Date().toISOString();
   inMemoryUsers.push({
     id: DEFAULT_USER_ID,

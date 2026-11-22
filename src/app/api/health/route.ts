@@ -6,7 +6,11 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const dbReady = await store.isDbReady();
 
-  if (process.env.NODE_ENV === "production" && !dbReady) {
+  if (
+    process.env.NODE_ENV === "production" &&
+    !dbReady &&
+    process.env.CORECAPITAL_USE_IN_MEMORY !== "true"
+  ) {
     return NextResponse.json(
       {
         status: "degraded",
